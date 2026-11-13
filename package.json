@@ -1,0 +1,69 @@
+{
+  "name": "vsread",
+  "displayName": "VSRead · 本地阅读器",
+  "description": "离线 EPUB、TXT、PDF 阅读器，自动保存进度，让故事住进 IDE。",
+  "version": "0.1.2",
+  "publisher": "vsread-local",
+  "private": true,
+  "repository": { "type": "git", "url": "https://github.com/linkyu9319/VSRead.git" },
+  "homepage": "https://github.com/linkyu9319/VSRead#readme",
+  "bugs": { "url": "https://github.com/linkyu9319/VSRead/issues" },
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "keywords": ["epub", "pdf", "txt", "reader", "offline"],
+  "main": "./dist/extension.cjs",
+  "extensionKind": ["ui"],
+  "activationEvents": ["onWebviewPanel:vsread.reader"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [{ "id": "vsread", "title": "VSRead", "icon": "media/activity-book.svg" }]
+    },
+    "views": {
+      "vsread": [{ "id": "vsread.launcher", "name": "阅读入口", "icon": "media/activity-book.svg" }]
+    },
+    "commands": [
+      { "command": "vsread.open", "title": "VSRead: 打开阅读器", "icon": "$(book)" },
+      { "command": "vsread.import", "title": "VSRead: 导入本地电子书", "icon": "$(add)" }
+    ],
+    "menus": {
+      "explorer/context": [{ "command": "vsread.import", "when": "resourceExtname =~ /\\.(txt|epub|pdf)$/i", "group": "navigation@90" }],
+      "view/title": [
+        { "command": "vsread.open", "when": "view == vsread.launcher", "group": "navigation@1" },
+        { "command": "vsread.import", "when": "view == vsread.launcher", "group": "navigation@2" }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "test:browser": "playwright test",
+    "check": "npm run typecheck && npm run build && npm test",
+    "package": "npm run check && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links --out vsread-0.1.2.vsix",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "epubjs": "0.3.93",
+    "iconv-lite": "^0.7.0",
+    "pdfjs-dist": "6.5.438",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "overrides": { "@xmldom/xmldom": "0.9.12" },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/vscode": "1.85.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.27.0",
+    "jszip": "^3.10.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.2.0"
+  }
+}

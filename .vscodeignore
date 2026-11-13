@@ -1,0 +1,11 @@
+**
+!package.json
+!README.md
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!CHANGELOG.md
+!media/**
+!docs/**
+!dist/extension.cjs
+!dist/txtWorker.cjs
+!dist/webview/**

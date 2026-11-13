@@ -1,0 +1,188 @@
+import { test, expect, type Page } from '@playwright/test';
+
+async function mockHost(page: Page) {
+  await page.addInitScript(() => {
+    const initial = {
+      version: 1, settings: { theme: 'ide', fontSize: 19, lineHeight: 1.9, fontFamily: 'serif', flow: 'scrolled', zoom: 1, backgroundColor: '#faf8f2', textColor: '#302e2a' },
+      books: ['txt', 'epub', 'pdf'].map((format, i) => ({ id: String.fromCharCode(97 + i).repeat(64), format, title: `示例 ${format}`, importedAt: '2026-11-12', size: 1024 })),
+    };
+    let library = JSON.parse(localStorage.getItem('test-library') || JSON.stringify(initial));
+    const textData = async () => {
+      const text = await (await fetch('/fixtures/demo.txt')).text();
+      const middle = text.indexOf('第二章');
+      return { text, index: { encoding: 'utf-8', length: text.length, parts: [
+        { index: 0, title: '第一章 星海', start: 0, end: middle, chapter: true },
+        { index: 1, title: '第二章 远航', start: middle, end: text.length, chapter: true },
+      ] } };
+    };
+    window.acquireVsCodeApi = () => ({
+      getState: () => ({}), setState: () => {},
+      postMessage: async ({ id, method, args }: any) => {
+        let result;
+        const book = args?.id && library.books.find((book: any) => book.id === args.id);
+        if (method === 'init' || method === 'import') result = library;
+        if (method === 'open' || method === 'encoding') {
+          library.lastBookId = book.id;
+          result = { book, ...(book.format === 'txt' ? { textIndex: (await textData()).index } : {}) };
+        }
+        if (method === 'text') { const { text, index } = await textData(); const part = index.parts[args.part]; result = { part, text: text.slice(part.start, part.end) }; }
+        if (method === 'binary') {
+          const fixture = book.format === 'pdf' ? (window as any).__pdfFixture || 'demo.pdf' : 'demo.' + book.format;
+          const bytes = new Uint8Array(await (await fetch('/fixtures/' + fixture)).arrayBuffer());
+          const part = bytes.subarray(args.offset, args.offset + 512 * 1024);
+          const reads = ((window as any).__binaryReads ??= []);
+          reads.push({ offset: args.offset, length: part.length, total: bytes.length });
+          let binary = '';
+          for (const byte of part) binary += String.fromCharCode(byte);
+          result = { base64: btoa(binary), total: bytes.length };
+        }
+        if (method === 'progress') book.progress = args.progress;
+        if (method === 'metadata') Object.assign(book, args);
+        if (method === 'settings') library.settings = args;
+        if (method === 'remove') { library.books = library.books.filter((item: any) => item.id !== args.id); result = library; }
+        localStorage.setItem('test-library', JSON.stringify(library));
+        const payload = structuredClone({ id, result });
+        setTimeout(() => window.postMessage(payload, '*'), 0);
+      },
+    });
+  });
+}
+
+test.beforeEach(async ({ page }) => { await mockHost(page); await page.goto('/'); });
+
+test('TXT 章节、翻页、偏好和重启恢复', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 txt' }).click();
+  await expect(page.locator('.txt-content')).toContainText('第一章 星海');
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await expect.poll(() => page.locator('.txt-surface').evaluate(element => element.scrollTop)).toBeGreaterThan(100);
+  await page.getByRole('button', { name: '第二章 远航', exact: true }).click();
+  await expect(page.locator('.txt-content')).toContainText('第二章 远航');
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  await page.getByLabel('阅读主题').selectOption('light');
+  await page.getByLabel('字号', { exact: true }).fill('24');
+  await expect(page.locator('.app')).toHaveAttribute('data-theme', 'light');
+  await expect(page.locator('.save-indicator')).toContainText('进度已保存');
+  await page.reload();
+  await expect(page.locator('.txt-content')).toContainText('第二章 远航');
+  await expect(page.locator('.txt-content')).toHaveCSS('font-size', '24px');
+  await expect(page.locator('.app')).toHaveAttribute('data-theme', 'light');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('自定义颜色和精确字号可保存，点外部与 Esc 关闭偏好', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 txt' }).click();
+  await expect(page.locator('.txt-content')).toBeVisible();
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: '阅读偏好' });
+  await page.getByLabel('阅读主题').selectOption('custom');
+  await page.getByLabel('背景颜色', { exact: true }).fill('#cce8cf');
+  await page.getByLabel('文字颜色', { exact: true }).fill('#25342a');
+  await page.getByLabel('字号数值', { exact: true }).fill('28');
+  await expect(settings).toBeVisible();
+  await expect(page.locator('.app')).toHaveCSS('background-color', 'rgb(204, 232, 207)');
+  await expect(page.locator('.txt-content')).toHaveCSS('color', 'rgb(37, 52, 42)');
+  await expect(page.locator('.txt-content')).toHaveCSS('font-size', '28px');
+  await page.screenshot({ path: '.test-data/preferences-0.1.2.png' });
+  await page.locator('.settings-dismiss').click({ position: { x: 30, y: 190 } });
+  await expect(settings).toHaveCount(0);
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(settings).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '阅读设置', exact: true })).toBeFocused();
+  await page.reload();
+  await expect(page.locator('.txt-content')).toHaveCSS('font-size', '28px');
+  await expect(page.locator('.app')).toHaveCSS('background-color', 'rgb(204, 232, 207)');
+  await expect(page.locator('.reading-percentage')).toHaveText(/\d+\.\d{2}%/);
+  await page.getByRole('button', { name: '我的书架', exact: true }).click();
+  await expect(page.locator('.book-card').filter({ hasText: '示例 txt' })).toContainText(/已读 \d+\.\d{2}%/);
+});
+
+test('EPUB iframe、内嵌图片样式、脚本隔离及 CFI 恢复', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 epub' }).click();
+  const frame = page.frameLocator('.epub-surface iframe');
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await expect(frame.locator('h1')).toHaveCSS('color', 'rgb(30, 120, 90)');
+  await expect.poll(() => frame.locator('img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(0);
+  await expect(frame.locator('script')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__epubScriptRan)).toBeUndefined();
+  await page.getByRole('button', { name: '第二章 远航', exact: true }).click();
+  await expect(frame.locator('h1')).toHaveText('第二章 远航');
+  await expect(page.locator('.save-indicator')).toContainText('进度已保存');
+  await expect(page.locator('.reading-percentage')).not.toHaveText('0.00%');
+  await page.reload();
+  await expect(page.frameLocator('.epub-surface iframe').locator('h1')).toHaveText('第二章 远航');
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  await page.getByLabel('阅读方式').selectOption('paginated');
+  await page.getByLabel('阅读主题').selectOption('custom');
+  await page.getByLabel('背景颜色', { exact: true }).fill('#f4ecd8');
+  await page.getByLabel('文字颜色', { exact: true }).fill('#483d2e');
+  await page.getByLabel('字号数值', { exact: true }).fill('26');
+  const restoredFrame = page.frameLocator('.epub-surface iframe');
+  await expect(restoredFrame.locator('body')).toHaveCSS('background-color', 'rgb(244, 236, 216)');
+  await expect(restoredFrame.locator('p').first()).toHaveCSS('color', 'rgb(72, 61, 46)');
+  await expect(restoredFrame.locator('p').first()).toHaveCSS('font-size', '26px');
+  await expect(restoredFrame.locator('h1')).toHaveCSS('color', 'rgb(30, 120, 90)');
+  await page.locator('.settings-dismiss').click({ position: { x: 400, y: 300 } });
+  await expect(page.getByRole('dialog', { name: '阅读偏好' })).toHaveCount(0);
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  await page.getByLabel('阅读主题').selectOption('ide');
+  await page.addStyleTag({ content: ':root { --vscode-editor-background: #112233; --vscode-editor-foreground: #ddeeff; }' });
+  await page.evaluate(() => document.body.setAttribute('data-vscode-theme-id', 'test-theme'));
+  await expect(restoredFrame.locator('body')).toHaveCSS('background-color', 'rgb(17, 34, 51)');
+  await expect(restoredFrame.locator('p').first()).toHaveCSS('color', 'rgb(221, 238, 255)');
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('PDF 返回书架再开复用数据，翻页不重新传输全书', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 pdf' }).click();
+  await expect(page.locator('canvas[aria-label="第 1 页"]')).toBeVisible();
+  await expect(page.locator('.textLayer')).toContainText('VSRead - Page 1');
+  const reads = await page.evaluate(() => (window as any).__binaryReads?.length ?? 0);
+  expect(reads).toBeGreaterThan(0);
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await expect(page.locator('.textLayer')).toContainText('VSRead - Page 2');
+  await expect(page.locator('.save-indicator')).toContainText('进度已保存');
+  await page.getByRole('button', { name: '我的书架', exact: true }).click();
+  await page.getByRole('button', { name: '阅读 示例 pdf' }).click();
+  await expect(page.locator('canvas[aria-label="第 2 页"]')).toBeVisible();
+  await expect(page.locator('.textLayer')).toContainText('VSRead - Page 2');
+  expect(await page.evaluate(() => (window as any).__binaryReads.length)).toBe(reads);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('大 PDF 首屏只请求所需片段', async ({ page }) => {
+  await page.evaluate(() => { (window as any).__pdfFixture = 'large.pdf'; });
+  await page.getByRole('button', { name: '阅读 示例 pdf' }).click();
+  await expect(page.locator('.textLayer')).toContainText('VSRead - Page 1');
+  const reading = await page.evaluate(() => {
+    const reads = (window as any).__binaryReads as { length: number; total: number }[];
+    return { transferred: reads.reduce((sum, read) => sum + read.length, 0), total: reads[0].total };
+  });
+  expect(reading.total).toBeGreaterThan(4 * 1024 * 1024);
+  expect(reading.transferred).toBeLessThan(reading.total / 2);
+  console.log(`大 PDF 首屏传输 ${reading.transferred} / ${reading.total} 字节`);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('PDF 本地 Worker、文字层、目录、搜索、缩放及页码恢复', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 pdf' }).click();
+  await expect(page.locator('canvas[aria-label="第 1 页"]')).toBeVisible();
+  await expect(page.locator('.textLayer')).toContainText('VSRead - Page 1');
+  await page.getByRole('button', { name: 'Chapter Two', exact: true }).click();
+  await expect(page.locator('canvas[aria-label="第 2 页"]')).toBeVisible();
+  await page.getByLabel('搜索 PDF 文字').fill('Chapter 3');
+  await page.getByRole('button', { name: '查找', exact: true }).click();
+  await page.getByRole('button', { name: /第 3 页 ·/ }).click();
+  await expect(page.locator('canvas[aria-label="第 3 页"]')).toBeVisible();
+  await page.getByRole('button', { name: '关闭搜索结果' }).click();
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  await page.getByLabel('PDF 缩放').fill('1.5');
+  await expect(page.locator('.textLayer')).toContainText('VSRead - Page 3');
+  await expect(page.locator('.save-indicator')).toContainText('进度已保存');
+  await page.reload();
+  await expect(page.locator('canvas[aria-label="第 3 页"]')).toBeVisible();
+  await expect(page.locator('.textLayer')).toContainText('VSRead - Page 3');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.vsix
+test-results/
+playwright-report/
+.test-data/
+.vscode-test/
+*.log
+.env
+.env.*
+!.env.example
+.publish/

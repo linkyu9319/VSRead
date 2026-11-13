@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.svg text eol=lf
+*.png binary
+*.epub binary
+*.pdf binary
+*.vsix binary
+# 保留上游许可文本原样，不做空白风格检查。
+media/licenses/** -whitespace
