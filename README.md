@@ -1,6 +1,6 @@
-# VSRead
+# 🥬 VSRead | 青菜阅读
 
-VSRead 是面向 CodeBuddy IDE 和 Visual Studio Code 的电子书阅读扩展，支持本地 EPUB、TXT、PDF，以及可配置的在线书源。书库、阅读进度、偏好和章节缓存保存在本机。
+青菜阅读（VSRead）是面向 CodeBuddy IDE 和 Visual Studio Code 的电子书阅读扩展，支持本地 EPUB、TXT、PDF，以及可配置的在线书源。书库、阅读进度、偏好和章节缓存保存在本机。
 
 ## 功能
 
@@ -19,7 +19,7 @@ VSRead 是面向 CodeBuddy IDE 和 Visual Studio Code 的电子书阅读扩展�
 ## 安装与使用
 
 1. 在 IDE 扩展面板选择 **从 VSIX 安装…**，安装对应版本的 VSIX 文件。
-2. 点击活动栏中的 **VSRead** 书本图标，选择“打开阅读器”。
+2. 点击活动栏中的 **VSRead · 青菜阅读** 图标，选择“打开阅读器”。
 3. 在书架中导入本地电子书，或进入“在线书源”配置来源。
 
 也可通过命令面板执行 `VSRead: 打开阅读器`、`VSRead: 导入本地电子书`。升级时覆盖安装即可，同一 IDE 用户配置中的书库和进度会保留。

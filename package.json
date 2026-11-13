@@ -1,8 +1,9 @@
 {
   "name": "vsread",
-  "displayName": "VSRead · 本地阅读器",
+  "displayName": "VSRead · 青菜阅读",
+  "icon": "media/icon.png",
   "description": "离线 EPUB、TXT、PDF 阅读器，自动保存进度，让故事住进 IDE。",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "vsread-local",
   "private": true,
   "repository": {
@@ -39,7 +40,7 @@
       "activitybar": [
         {
           "id": "vsread",
-          "title": "VSRead",
+          "title": "VSRead · 青菜阅读",
           "icon": "media/activity-book.svg"
         }
       ]
@@ -98,7 +99,7 @@
     "test": "tsx --test test/*.test.ts",
     "test:browser": "playwright test",
     "check": "npm run typecheck && npm run build && npm test",
-    "package": "npm run check && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links --out vsread-0.1.2.vsix",
+    "package": "npm run check && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links --out vsread-0.1.3.vsix",
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {

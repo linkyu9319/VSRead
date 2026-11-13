@@ -63,6 +63,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const configure = async (target: vscode.WebviewPanel) => {
     panel = target;
+    target.title = 'VSRead · 青菜阅读';
+    target.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'vegetable.svg');
     target.webview.options = {
       enableScripts: true,
       // 书籍通过 Host 消息读取，避免各 IDE 对 storage URI scheme 的授权差异。
@@ -154,7 +156,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const show = async () => {
     if (panel) { panel.reveal(vscode.ViewColumn.Active); return panel; }
-    const target = vscode.window.createWebviewPanel('vsread.reader', 'VSRead', vscode.ViewColumn.Active, { enableScripts: true });
+    const target = vscode.window.createWebviewPanel('vsread.reader', 'VSRead · 青菜阅读', vscode.ViewColumn.Active, { enableScripts: true });
     await configure(target);
     return target;
   };

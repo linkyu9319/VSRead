@@ -20,6 +20,6 @@ export function registerSidebar(context: vscode.ExtensionContext): void {
     getChildren: item => item ? [] : entries,
   };
   const view = vscode.window.createTreeView('vsread.launcher', { treeDataProvider: provider, showCollapseAll: false });
-  view.message = '你的本地阅读空间 · EPUB / TXT / PDF';
+  view.message = '青菜阅读 · EPUB / TXT / PDF';
   context.subscriptions.push(view);
 }

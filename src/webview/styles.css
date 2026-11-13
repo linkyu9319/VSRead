@@ -29,8 +29,10 @@ svg { flex-shrink: 0; }
 .app[data-theme="dark"] { --bg: #1c2025; --fg: #d4d7d9; --panel: #181c21; --border: #30363b; --muted: #8f989f; --accent: #83b8a5; color-scheme: dark; }
 .app-header { min-height: 64px; padding: 0 24px; display: flex; align-items: center; gap: 20px; border-bottom: 1px solid var(--border); background: var(--panel); position: relative; z-index: 21; }
 .brand { display: flex; align-items: center; gap: 0; font-size: 20px; font-weight: 650; letter-spacing: -.6px; padding: 4px; }
-.brand > span:last-child { font-weight: 400; color: var(--accent); }
+.brand-read { font-weight: 400; color: var(--accent); }
+.brand-cn { font-size: 11px; font-weight: 400; letter-spacing: .4px; color: var(--muted); margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--border); white-space: nowrap; }
 .brand-mark { display: inline-flex; color: var(--accent); margin-right: 10px; }
+.vegetable-mark { font-size: 22px; line-height: 1; font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif; }
 .header-divider { width: 1px; height: 19px; background: var(--border); }
 .header-title { min-width: 0; display: flex; align-items: center; gap: 12px; flex: 1; }
 .header-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -138,6 +140,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; position: 
 .pdf-search { display: flex; gap: 8px; align-items: center; color: var(--muted); }.pdf-search input { font-size: 11px; padding: 4px 6px; max-width: 170px; }
 .search-results { width: 240px; padding: 15px; border-left: 1px solid var(--border); overflow: auto; background: var(--panel); }.search-results p { font-size: 10px; line-height: 1.8; }.search-results > button { display: block; width: 100%; text-align: left; font-size: 11px; line-height: 1.7; padding: 10px 3px; border-bottom: 1px solid var(--border); }
 @media (max-width: 700px) {
+  .brand-cn { display: none; }
   .app-header { padding: 0 14px; gap: 12px; min-height: 55px; }.header-title small { display: none; }.shelf-page { padding: 30px 22px; }.toolbar-hint { display: none; }.contents-panel { width: 175px; }.txt-content { padding: 26px 24px 60px; }.page-controls { padding: 0 12px; }.page-controls > span { display: none; }.search-results { position: absolute; right: 0; top: 0; bottom: 0; z-index: 10; box-shadow: -4px 0 20px #0003; }
 }
 @media (max-width: 450px) { .contents-panel { position: absolute; z-index: 10; left: 0; top: 0; bottom: 0; width: 200px; box-shadow: 4px 0 20px #0003; }.header-title { font-size: 11px; }.brand { font-size: 17px; }.app-status { padding: 0 10px; gap: 12px; }.settings-panel { right: 10px; }.book-list { grid-template-columns: 1fr; } }
