@@ -26,13 +26,14 @@ export function request<K extends keyof Requests>(method: K, args: Requests[K]['
     api.postMessage({ id, method, args });
   });
 }
-interface SavedView { view: 'shelf' | 'online'; bookId?: string; onlineBookId?: string }
+interface SavedView { view: 'shelf' | 'online'; bookId?: string; onlineBookId?: string; focus?: boolean }
 export function savedView(): SavedView {
   const value = api?.getState();
   if (!value || typeof value !== 'object') return { view: 'shelf' };
   const state = value as Record<string, unknown>;
   const id = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
-  return { view: state.view === 'online' ? 'online' : 'shelf', bookId: id(state.bookId), onlineBookId: id(state.onlineBookId) };
+  return { view: state.view === 'online' ? 'online' : 'shelf', bookId: id(state.bookId), onlineBookId: id(state.onlineBookId), focus: state.focus === true };
 }
-export function rememberBook(id?: string): void { api?.setState({ view: 'shelf', bookId: id }); }
-export function rememberOnline(id?: string): void { api?.setState({ view: 'online', onlineBookId: id }); }
+export function rememberBook(id?: string): void { api?.setState({ view: 'shelf', bookId: id, focus: savedView().focus }); }
+export function rememberOnline(id?: string): void { api?.setState({ view: 'online', onlineBookId: id, focus: savedView().focus }); }
+export function rememberFocus(focus: boolean): void { api?.setState({ ...savedView(), focus }); }

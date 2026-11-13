@@ -5,12 +5,16 @@ import { sanitizeEpubDocument } from './epubSecurity';
 import { readBookBytes } from './bookBytes';
 import { estimateEpubProgress, type EpubLocation } from './epubProgress';
 import { progress, readingColors, type ReaderAdapter, type ReaderEvents } from './types';
+import { resetReadingScroll, scrollReadingSurface, stopReadingScroll } from './readerScroll';
 
 export class EpubReader implements ReaderAdapter {
   private book?: Book;
   private rendition?: Rendition;
   private destroyed = false;
   private ready = false;
+  private moving = false;
+  private watchedViewport?: HTMLElement;
+  private scrollTimer?: ReturnType<typeof setTimeout>;
   private abort = new AbortController();
   constructor(private container: HTMLElement, private settings: ReaderSettings, private events: ReaderEvents) { container.className = 'engine-surface epub-surface'; }
 
@@ -56,6 +60,7 @@ export class EpubReader implements ReaderAdapter {
     }
     if (this.destroyed) return;
     this.ready = true;
+    this.watchViewport();
     // epub.js 的声明把 location range 写成了单个 location，运行时也可能返回 Promise。
     const location = await Promise.resolve(rendition.currentLocation() as unknown as EpubLocation | Promise<EpubLocation>);
     if (this.destroyed) return;
@@ -76,13 +81,73 @@ export class EpubReader implements ReaderAdapter {
     this.events.progress(progress({ format: 'epub', cfi: location.start.cfi }, estimateEpubProgress(location, spineLength, hasLocations)));
   }
   private onKeyDown = (event: KeyboardEvent) => {
-    if (event.ctrlKey || event.altKey || event.metaKey || (event.target as HTMLElement)?.closest('input,select,textarea,[contenteditable]')) return;
+    if (event.defaultPrevented) return;
+    if ((event.ctrlKey || event.metaKey) && event.altKey && event.key.toLowerCase() === 'h') {
+      event.preventDefault();
+      if (!event.repeat) window.dispatchEvent(new CustomEvent('vsread:toggle-focus'));
+      return;
+    }
+    if (event.key === 'Escape') {
+      if (!event.repeat) window.dispatchEvent(new CustomEvent('vsread:exit-focus'));
+      return;
+    }
+    if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || (event.target as HTMLElement)?.closest('input,select,textarea,[contenteditable]')) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); this.scroll(event.key === 'ArrowDown' ? 1 : -1); }
     if (event.key === 'ArrowRight' || event.key === 'PageDown') { event.preventDefault(); void this.next().catch(this.events.error); }
     if (event.key === 'ArrowLeft' || event.key === 'PageUp') { event.preventDefault(); void this.previous().catch(this.events.error); }
   };
-  async next(): Promise<void> { if (!this.destroyed) await this.rendition?.next(); }
-  async previous(): Promise<void> { if (!this.destroyed) await this.rendition?.prev(); }
-  async goTo(target: string): Promise<void> { if (!this.destroyed) await this.rendition?.display(target); }
+  private viewport(): HTMLElement { return this.container.querySelector<HTMLElement>('.epub-container') ?? this.container; }
+  private watchViewport(): void {
+    if (this.destroyed) return;
+    const viewport = this.viewport();
+    if (viewport === this.watchedViewport) return;
+    this.watchedViewport?.removeEventListener('scroll', this.onViewportScroll);
+    this.watchedViewport = viewport;
+    viewport.addEventListener('scroll', this.onViewportScroll, { passive: true });
+  }
+  private onViewportScroll = () => {
+    clearTimeout(this.scrollTimer);
+    if (!this.ready || this.destroyed || this.moving) return;
+    // epub.js 的 silent scroll 会吞掉切章后的首个 scroll；单次滚动也必须更新 CFI。
+    this.scrollTimer = setTimeout(() => {
+      if (this.ready && !this.destroyed && !this.moving) void this.rendition?.reportLocation().catch(this.events.error);
+    }, 80);
+  };
+  scroll(direction: -1 | 1): void {
+    if (this.destroyed || !this.ready) return;
+    const viewport = this.viewport();
+    const contents = this.rendition?.getContents() as unknown as Contents[] | undefined;
+    const surface = viewport.scrollHeight > viewport.clientHeight + 1 ? viewport : contents?.map(content => content.document.scrollingElement as HTMLElement | null).find(node => node && node.scrollHeight > node.clientHeight + 1);
+    if (surface) scrollReadingSurface(surface, direction, this.settings.fontSize * this.settings.lineHeight);
+  }
+  private async move(direction: 'next' | 'prev'): Promise<void> {
+    const rendition = this.rendition;
+    if (this.destroyed || !this.ready || !rendition || this.moving) return;
+    this.moving = true;
+    clearTimeout(this.scrollTimer);
+    const previous = (rendition.getContents() as unknown as Contents[])[0]?.sectionIndex;
+    stopReadingScroll(this.viewport());
+    try {
+      await rendition[direction]();
+      if (this.destroyed) return;
+      const current = (rendition.getContents() as unknown as Contents[])[0]?.sectionIndex;
+      // scrolled-doc 复用外层滚动容器；跨章必须从章首开始，章内分页仍交由引擎处理。
+      if (this.settings.flow === 'scrolled' && current !== previous) {
+        resetReadingScroll(this.viewport());
+        await rendition.reportLocation();
+      }
+    } finally { this.moving = false; }
+  }
+  async next(): Promise<void> { await this.move('next'); }
+  async previous(): Promise<void> { await this.move('prev'); }
+  async goTo(target: string): Promise<void> {
+    if (!this.destroyed) {
+      clearTimeout(this.scrollTimer);
+      stopReadingScroll(this.viewport());
+      await this.rendition?.display(target);
+      if (!this.destroyed) this.watchViewport();
+    }
+  }
   update(settings: ReaderSettings): void {
     const oldFlow = this.settings.flow;
     this.settings = settings;
@@ -90,6 +155,7 @@ export class EpubReader implements ReaderAdapter {
     const contents = this.rendition.getContents() as unknown as Contents[];
     contents.forEach(content => this.applyContentSettings(content));
     if (oldFlow !== settings.flow) this.rendition.flow(settings.flow === 'scrolled' ? 'scrolled-doc' : 'paginated');
+    if (this.ready) this.watchViewport();
   }
   private applyContentSettings(contents: Contents): void {
     const settings = this.settings;
@@ -127,6 +193,8 @@ export class EpubReader implements ReaderAdapter {
     this.abort.abort();
     this.destroyed = true;
     this.ready = false;
+    clearTimeout(this.scrollTimer);
+    this.watchedViewport?.removeEventListener('scroll', this.onViewportScroll);
     this.book?.destroy();
     this.container.replaceChildren();
   }

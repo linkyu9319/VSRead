@@ -1,0 +1,23 @@
+{
+  "bookSourceName": "经致文学（公开章节）",
+  "bookSourceUrl": "https://www.jingzhi5.com",
+  "enabled": true,
+  "searchUrl": "/?s=search&a=index&keyword={{key}}&page={{page}}",
+  "ruleSearch": {
+    "bookList": ".works-list > li",
+    "name": "a.title@text",
+    "author": ".search-info a:not(.title)@text",
+    "bookUrl": "a.title@href"
+  },
+  "ruleBookInfo": {
+    "name": "h2@text",
+    "author": ".author-zone a.name@text",
+    "tocUrl": ".buttons a.index@href"
+  },
+  "ruleToc": {
+    "chapterList": ".float-list a.name:not(.isvip)",
+    "chapterName": "@text",
+    "chapterUrl": "@href"
+  },
+  "ruleContent": { "content": ".page-content@text" }
+}

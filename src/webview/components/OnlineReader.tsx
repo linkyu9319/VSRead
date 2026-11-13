@@ -12,10 +12,15 @@ interface Props {
   onBack(): void; onBookChange(book: OnlineBookRecord): void; onError(error: unknown): void;
 }
 
+interface DisplayedChapter {
+  content: OnlineChapterContent; index: number; scroll: number; generation: number;
+}
+
 export function OnlineReader(props: Props) {
   const [book, setBook] = useState(props.book);
-  const [content, setContent] = useState<OnlineChapterContent>();
-  const [chapterIndex, setChapterIndex] = useState(Math.max(0, props.book.progress?.chapter ?? 0));
+  const [displayed, setDisplayed] = useState<DisplayedChapter>();
+  const content = displayed?.content;
+  const chapterIndex = displayed?.index ?? Math.max(0, props.book.progress?.chapter ?? 0);
   const [loading, setLoading] = useState(true);
   const [task, setTask] = useState('');
   const [message, setMessage] = useState('');
@@ -32,8 +37,10 @@ export function OnlineReader(props: Props) {
   const readable = useRef(false);
   const shownChapter = useRef(chapterIndex);
   const targetChapter = useRef(chapterIndex);
+  const loadingChapter = useRef(true);
   const restore = useRef(props.book.progress?.scroll ?? 0);
   const lastPosition = useRef<ChapterPosition>(position);
+  const viewportSize = useRef({ width: 0, height: 0 });
   const writer = useRef<OnlineProgressWriter | undefined>(undefined);
   latest.current = props;
   bookRef.current = book;
@@ -60,6 +67,12 @@ export function OnlineReader(props: Props) {
   const capture = useCallback(() => {
     const node = viewport.current;
     if (!node || !readable.current) return;
+    const size = viewportSize.current;
+    if (size.width && (size.width !== node.clientWidth || size.height !== node.clientHeight)) {
+      // 专注模式/折叠目录改变视口时，先恢复已捕获比例，再采样新布局。
+      node.scrollTo({ top: lastPosition.current.scroll * Math.max(0, node.scrollHeight - node.clientHeight), behavior: 'instant' });
+    }
+    viewportSize.current = { width: node.clientWidth, height: node.clientHeight };
     remember({ chapter: shownChapter.current, scroll: Math.min(1, Math.max(0, node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight))) });
   }, [remember]);
 
@@ -68,6 +81,8 @@ export function OnlineReader(props: Props) {
     capture();
     const token = ++generation.current;
     targetChapter.current = index;
+    restore.current = scroll;
+    loadingChapter.current = true;
     setLoading(true);
     setMessage('');
     await writer.current!.flush();
@@ -78,10 +93,9 @@ export function OnlineReader(props: Props) {
       if (!next.text.trim()) throw new Error('当前章节没有可阅读的正文');
       // 新正文提交前暂停滚动采样，防止旧 DOM 的滚动事件被记到新章节。
       readable.current = false;
-      shownChapter.current = index;
-      restore.current = scroll;
-      setContent(next);
-      setChapterIndex(index);
+      // 正文与恢复位置属于同一次提交，避免两个相邻请求共享可变 restore 值。
+      const nextDisplay = { content: next, index, scroll: Math.min(1, Math.max(0, scroll)), generation: token };
+      setDisplayed(previous => token === generation.current ? nextDisplay : previous);
       const updated = { ...bookRef.current, cachedChapters: [...new Set([...bookRef.current.cachedChapters, index])].sort((a, b) => a - b) };
       bookRef.current = updated;
       setBook(updated);
@@ -91,7 +105,7 @@ export function OnlineReader(props: Props) {
         setMessage(error instanceof Error ? error.message : String(error));
         latest.current.onError(error);
       }
-    } finally { if (active.current && token === generation.current) setLoading(false); }
+    } finally { if (active.current && token === generation.current) { loadingChapter.current = false; setLoading(false); } }
   }, [capture, props.book.id]);
 
   useEffect(() => {
@@ -100,15 +114,30 @@ export function OnlineReader(props: Props) {
     void loadChapter(chapter, props.book.progress?.scroll ?? 0);
   }, [loadChapter, props.book.id]);
   useLayoutEffect(() => {
-    if (!content || !viewport.current) return;
+    if (!displayed || displayed.generation !== generation.current || !viewport.current) return;
     const node = viewport.current;
-    node.scrollTop = restore.current * Math.max(0, node.scrollHeight - node.clientHeight);
+    shownChapter.current = displayed.index;
+    // 普通换章明确从章首开始；只有恢复阅读/刷新正文才传入已保存比例。
+    // instant 与独立滚动节点共同阻止旧章节末尾的平滑滚动、焦点及锚定回写。
+    node.scrollTo({ top: displayed.scroll * Math.max(0, node.scrollHeight - node.clientHeight), behavior: 'instant' });
+    if (!document.querySelector('[role="dialog"]')) node.focus({ preventScroll: true });
+    viewportSize.current = { width: node.clientWidth, height: node.clientHeight };
     readable.current = true;
-    remember({ chapter: shownChapter.current, scroll: restore.current });
-  }, [content, remember]);
+    remember({ chapter: displayed.index, scroll: node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight) });
+  }, [displayed, remember]);
   useLayoutEffect(() => {
     const node = viewport.current;
-    if (node && readable.current) node.scrollTop = lastPosition.current.scroll * Math.max(0, node.scrollHeight - node.clientHeight);
+    if (!node) return;
+    const observer = new ResizeObserver(() => {
+      const size = viewportSize.current;
+      if (size.width !== node.clientWidth || size.height !== node.clientHeight) capture();
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [displayed, capture]);
+  useLayoutEffect(() => {
+    const node = viewport.current;
+    if (node && readable.current) node.scrollTo({ top: lastPosition.current.scroll * Math.max(0, node.scrollHeight - node.clientHeight), behavior: 'instant' });
   }, [props.settings.fontSize, props.settings.lineHeight, props.settings.fontFamily]);
   useLayoutEffect(() => {
     active.current = true;
@@ -127,25 +156,33 @@ export function OnlineReader(props: Props) {
   }, []);
 
   const turn = useCallback((direction: -1 | 1) => {
+    if (loadingChapter.current) return;
     const next = shownChapter.current + direction;
     if (bookRef.current.chapters[next]) void loadChapter(next);
   }, [loadChapter]);
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (event.ctrlKey || event.metaKey || event.altKey || (event.target as Element)?.closest('input,textarea,select,button,[contenteditable]') || !readable.current) return;
+      const target = event.target;
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || (target instanceof Element && target.closest('input,textarea,select,button,[contenteditable]')) || !readable.current) return;
       const node = viewport.current;
       if (!node) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const step = Math.max(24, latest.current.settings.fontSize * latest.current.settings.lineHeight * 2);
+        node.scrollTo({ top: node.scrollTop + (event.key === 'ArrowDown' ? step : -step), behavior: 'instant' });
+        capture();
+      }
       if (event.key === 'ArrowRight') { event.preventDefault(); turn(1); }
       if (event.key === 'ArrowLeft') { event.preventDefault(); turn(-1); }
       if (event.key === 'PageDown') {
         event.preventDefault();
         if (node.scrollTop + node.clientHeight >= node.scrollHeight - 4) turn(1);
-        else { node.scrollTop += node.clientHeight * .88; capture(); }
+        else { node.scrollTo({ top: node.scrollTop + node.clientHeight * .88, behavior: 'instant' }); capture(); }
       }
       if (event.key === 'PageUp') {
         event.preventDefault();
         if (node.scrollTop < 4) turn(-1);
-        else { node.scrollTop -= node.clientHeight * .88; capture(); }
+        else { node.scrollTo({ top: node.scrollTop - node.clientHeight * .88, behavior: 'instant' }); capture(); }
       }
     };
     window.addEventListener('keydown', keydown);
@@ -207,7 +244,7 @@ export function OnlineReader(props: Props) {
     })}>清除缓存</button>{task && <span className="online-inline-status" role="status">{task}中…</span>}</div>
     {message && <p className="online-message" role="status">{message}{!content && !loading && <button className="text-button" onClick={() => void loadChapter(targetChapter.current, restore.current)}>重试</button>}</p>}
     <div className="online-reader-body">{tocVisible && <aside className="online-toc" aria-label="在线章节目录"><div className="filter-field"><Icon name="search" size={15} /><input aria-label="筛选在线章节" placeholder="查找章节…" value={filter} onChange={event => setFilter(event.target.value)} /></div><nav>{book.chapters.map((chapter, index) => ({ chapter, index })).filter(({ chapter }) => chapter.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase())).map(({ chapter, index }) => <button key={chapter.id} className={index === chapterIndex && content ? 'active' : ''} onClick={() => void loadChapter(index)} title={chapter.title}><span>{chapter.title}</span>{book.cachedChapters.includes(index) && <Icon name="check" size={12} />}</button>)}</nav></aside>}
-      <div className="online-reading-stage"><div ref={viewport} className="online-reading-surface" onScroll={capture} data-testid="online-reading-surface">{content && <article className="online-chapter-content" style={textStyle}><h3>{content.chapter.title}</h3><div>{content.text}</div></article>}</div>{loading && <div className={`online-loading ${content ? 'online-loading-small' : ''}`} role="status"><span className="spinner" />正在读取章节…</div>}{!loading && !content && <div className="online-no-content"><Icon name="book" size={30} /><p>选择章节开始阅读</p></div>}</div>
+      <div className="online-reading-stage"><div key={content?.chapter.id ?? 'empty'} ref={viewport} className="online-reading-surface" style={{ overflowAnchor: 'none' }} tabIndex={0} aria-label="在线章节正文" onScroll={capture} data-testid="online-reading-surface">{content && <article className="online-chapter-content" style={textStyle}><h3>{content.chapter.title}</h3><div>{content.text}</div></article>}</div>{loading && <div className={`online-loading ${content ? 'online-loading-small' : ''}`} role="status"><span className="spinner" />正在读取章节…</div>}{!loading && !content && <div className="online-no-content"><Icon name="book" size={30} /><p>选择章节开始阅读</p></div>}</div>
     </div>
     <div className="page-controls"><button className="text-button" disabled={loading || chapterIndex <= 0} onClick={() => turn(-1)}><Icon name="left" size={16} />上一章</button><span>{content?.cached ? '离线缓存' : content ? '正文已缓存' : ''} · {saveState} · {formatPercentage(percentage)}</span><button className="text-button" disabled={loading || chapterIndex >= book.chapters.length - 1} onClick={() => turn(1)}>下一章<Icon name="right" size={16} /></button></div>
   </section>;

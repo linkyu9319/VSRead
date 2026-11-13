@@ -60,7 +60,8 @@ export function ReaderView(props: Props) {
   const goTo = (target: string) => { void engine.current?.goTo(target).catch(latest.current.onError); };
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey || event.altKey || event.metaKey || (event.target as HTMLElement)?.closest('input,select,textarea,button,[contenteditable]')) return;
+      if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || document.querySelector('[role="dialog"]') || (event.target as HTMLElement)?.closest('input,select,textarea,[contenteditable]')) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); engine.current?.scroll(event.key === 'ArrowDown' ? 1 : -1); }
       if (event.key === 'PageDown' || event.key === 'ArrowRight') { event.preventDefault(); navigate('next'); }
       if (event.key === 'PageUp' || event.key === 'ArrowLeft') { event.preventDefault(); navigate('previous'); }
     };
@@ -79,12 +80,12 @@ export function ReaderView(props: Props) {
         setSearching(true);
         void engine.current.search(search.trim()).then(setHits).catch(props.onError).finally(() => setSearching(false));
       }}><Icon name="search" size={15} /><input aria-label="搜索 PDF 文字" placeholder="搜索 PDF 文字…" value={search} onChange={event => setSearch(event.target.value)} /><button className="text-button" disabled={searching || loading}>{searching ? '搜索中…' : '查找'}</button></form>}
-      <span className="toolbar-hint">{source.book.format === 'pdf' ? '文字可选择 · 扫描件可阅读' : 'PageUp / PageDown 翻页'}</span>
+      <span className="toolbar-hint">↑ ↓ 滚动 · ← → / PageUp / PageDown 翻页</span>
     </div>
     <div className="reader-body">
       {tocVisible && <Contents items={toc} onNavigate={goTo} />}
       <div className="reading-stage">
-        <div ref={mount} className="engine-surface" data-testid="reader-engine" />
+        <div ref={mount} className="engine-surface" data-testid="reader-engine" tabIndex={0} role="region" aria-label="电子书正文" />
         {loading && <div className="reader-overlay"><span className="spinner" /><p>正在翻开这本书…</p></div>}
         {failed && <div className="reader-overlay"><Icon name="book" size={32} /><p>这本书暂时无法打开</p><small>请检查文件是否完整、是否受 DRM 或密码保护。</small></div>}
       </div>

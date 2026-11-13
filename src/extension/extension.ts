@@ -27,6 +27,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let panel: vscode.WebviewPanel | undefined;
   let importing = false;
   let requestedView: 'online' | undefined;
+  let requestedFocus: boolean | undefined;
+  let focusMode = false;
+  const setPanelFocus = (target: vscode.WebviewPanel, enabled: boolean) => {
+    focusMode = enabled;
+    target.title = enabled ? 'notes.txt' : 'VSRead · 青菜阅读';
+    target.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', enabled ? 'file.svg' : 'vegetable.svg');
+  };
 
   const openBook = async (id: unknown): Promise<OpenBook> => {
     const book = library.book(id);
@@ -63,14 +70,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const configure = async (target: vscode.WebviewPanel) => {
     panel = target;
-    target.title = 'VSRead · 青菜阅读';
-    target.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'vegetable.svg');
+    setPanelFocus(target, false);
     target.webview.options = {
       enableScripts: true,
       // 书籍通过 Host 消息读取，避免各 IDE 对 storage URI scheme 的授权差异。
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview')],
     };
-    target.onDidDispose(() => { if (panel === target) panel = undefined; }, null, context.subscriptions);
+    void vscode.commands.executeCommand('setContext', 'vsread.readerActive', target.active);
+    target.onDidChangeViewState(event => { void vscode.commands.executeCommand('setContext', 'vsread.readerActive', event.webviewPanel.active); }, null, context.subscriptions);
+    target.onDidDispose(() => { if (panel === target) { panel = undefined; void vscode.commands.executeCommand('setContext', 'vsread.readerActive', false); } }, null, context.subscriptions);
     // 所有 Webview 输入均视为不可信：只接受已导入书籍的 ID，从不接收文件路径。
     target.webview.onDidReceiveMessage(async (message: unknown) => {
       if (!isRecord(message) || typeof message.id !== 'string' || message.id.length > 100 || typeof message.method !== 'string') return;
@@ -81,7 +89,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (onlineError && (request.method.startsWith('sources.') || request.method.startsWith('online.'))) throw new Error(onlineError);
         let result: unknown;
         switch (request.method) {
-          case 'init': result = { ...libraryStore.data, initialView: requestedView }; requestedView = undefined; break;
+          case 'init': result = { ...libraryStore.data, initialView: requestedView, initialFocus: requestedFocus }; requestedView = undefined; requestedFocus = undefined; break;
+          case 'focus': {
+            if (typeof args.enabled !== 'boolean') throw new Error('专注模式参数无效');
+            setPanelFocus(target, args.enabled);
+            break;
+          }
           case 'import': await importBooks(); result = libraryStore.data; break;
           case 'open': result = await openBook(args.id); break;
           case 'text': result = await library.text(library.book(args.id), args.part); break;
@@ -123,6 +136,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           case 'sources.list': result = online.listSources(); break;
+          case 'sources.builtin.list': result = online.listBuiltinSources(); break;
+          case 'sources.builtin.add': result = await online.addBuiltinSource(requiredString(args.id)); break;
           case 'sources.import': result = await online.importSources({ json: optionalString(args.json), url: optionalString(args.url) }); break;
           case 'sources.toggle': result = await online.toggleSource(requiredString(args.id), args.enabled === true); break;
           case 'sources.remove': result = await online.removeSource(requiredString(args.id)); break;
@@ -162,6 +177,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   context.subscriptions.push(
     vscode.commands.registerCommand('vsread.open', async () => { requestedView = undefined; await show(); }),
+    vscode.commands.registerCommand('vsread.toggleFocusMode', async () => {
+      if (panel) await panel.webview.postMessage({ event: 'focus', enabled: !focusMode });
+      else { requestedFocus = true; setPanelFocus(await show(), true); }
+    }),
     vscode.commands.registerCommand('vsread.sources', async () => {
       requestedView = 'online';
       const target = await show();

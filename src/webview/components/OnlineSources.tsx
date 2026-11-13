@@ -1,28 +1,24 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { BookSource, SourceImportResult } from '../../shared/online';
 import { Icon } from './Icon';
-import publicSource from '../../../examples/sources/gutenberg.json';
 
 interface Props {
-  sources: BookSource[]; busy: boolean;
+  sources: BookSource[]; busy: boolean; expanded: boolean; onExpandedChange(value: boolean): void;
   onImport(args: { json?: string; url?: string }): Promise<SourceImportResult | undefined>;
   onToggle(source: BookSource): void; onRemove(source: BookSource): void;
 }
 
-export function OnlineSources({ sources, busy, onImport, onToggle, onRemove }: Props) {
+export function OnlineSources({ sources, busy, expanded, onExpandedChange, onImport, onToggle, onRemove }: Props) {
   const [mode, setMode] = useState<'json' | 'url'>('json');
   const [json, setJson] = useState('');
   const [url, setUrl] = useState('');
-  const [expanded, setExpanded] = useState(!sources.length);
   const [report, setReport] = useState<SourceImportResult>();
   const [removing, setRemoving] = useState('');
+  const form = useRef<HTMLFormElement>(null);
+  useEffect(() => { if (expanded) form.current?.querySelector<HTMLTextAreaElement | HTMLInputElement>('textarea,input')?.focus(); }, [expanded]);
   return <section className="online-sources" aria-label="书源管理">
-    <div className="online-section-heading"><div><h2>书源管理 <span>{sources.length}</span></h2><p>导入 JSON 配置后，选择书源搜索书籍。</p></div><div className="source-heading-actions"><button className="text-button" disabled={busy} onClick={() => {
-      const json = JSON.stringify(publicSource, null, 2);
-      setMode('json'); setJson(json); setExpanded(true);
-      void onImport({ json }).then(result => { if (result) setReport(result); });
-    }}>公版示例</button><button className="text-button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}><Icon name={expanded ? 'close' : 'plus'} size={16} />{expanded ? '收起配置' : '导入书源'}</button></div></div>
-    {expanded && <form className="source-import-form" onSubmit={event => {
+    <div className="online-section-heading"><div><h2>书源管理 <span>{sources.length}</span></h2><p>管理已添加的书源，或导入自己的 JSON 配置。</p></div><button className="text-button" onClick={() => onExpandedChange(!expanded)} aria-expanded={expanded} aria-controls="source-import-form"><Icon name={expanded ? 'close' : 'plus'} size={16} />{expanded ? '收起配置' : '导入书源'}</button></div>
+    {expanded && <form ref={form} id="source-import-form" className="source-import-form" onSubmit={event => {
       event.preventDefault();
       if (busy) return;
       void onImport(mode === 'json' ? { json: json.trim() } : { url: url.trim() }).then(result => { if (result) setReport(result); });
@@ -35,6 +31,6 @@ export function OnlineSources({ sources, busy, onImport, onToggle, onRemove }: P
     {sources.length ? <div className="online-source-list">{sources.map(source => <div className="online-source-row" key={source.id}>
       <label className="source-enabled"><input type="checkbox" aria-label={`启用 ${source.name}`} checked={source.enabled} disabled={busy} onChange={() => onToggle(source)} /><span><strong>{source.name}</strong><small>{source.baseUrl}</small></span></label>
       {removing === source.id ? <div className="inline-confirm"><span>移除此书源？</span><button className="text-button danger-button" disabled={busy} onClick={() => { setRemoving(''); onRemove(source); }}>确定移除</button><button className="text-button" onClick={() => setRemoving('')}>取消</button></div> : <button className="icon-button" aria-label={`移除书源 ${source.name}`} title={`移除书源 ${source.name}`} disabled={busy} onClick={() => setRemoving(source.id)}><Icon name="trash" size={15} /></button>}
-    </div>)}</div> : <p className="online-empty-note">尚未配置书源。导入配置后即可进行在线搜索；已缓存的书籍仍可从在线书架打开。</p>}
+    </div>)}</div> : <p className="online-empty-note">可直接在上方选择内置书源搜索，也可导入自己的书源。</p>}
   </section>;
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DEFAULT_SETTINGS, type BookRecord, type Library, type OpenBook, type Progress, type ReaderSettings, type TextEncoding } from '../shared/model';
-import { rememberBook, rememberOnline, request, savedView } from './bridge';
+import { rememberBook, rememberFocus, rememberOnline, request, savedView } from './bridge';
 import { ProgressWriter } from './progressWriter';
 import { Bookshelf } from './components/Bookshelf';
 import { ReaderView } from './components/ReaderView';
@@ -26,10 +26,33 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
   const [saveState, setSaveState] = useState('本地自动保存');
+  const [focusMode, setFocusMode] = useState(() => savedView().focus === true);
+  const lastFocus = useRef(false);
   const opening = useRef(0);
   const settingsQueue = useRef(Promise.resolve());
   const settingsToggle = useRef<HTMLButtonElement>(null);
   const reportError = useCallback((error: unknown) => setError(error instanceof Error ? error.message : String(error)), []);
+  useEffect(() => {
+    if (focusMode) { setSettingsVisible(false); setUpdatesVisible(false); }
+    rememberFocus(focusMode);
+    if (lastFocus.current === focusMode) return;
+    lastFocus.current = focusMode;
+    void request('focus', { enabled: focusMode }).catch(reportError);
+  }, [focusMode, reportError]);
+  useEffect(() => {
+    const toggle = () => setFocusMode(value => !value);
+    const exit = () => setFocusMode(false);
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat) return;
+      if ((event.ctrlKey || event.metaKey) && event.altKey && event.key.toLowerCase() === 'h') {
+        event.preventDefault(); toggle();
+      } else if (event.key === 'Escape' && focusMode) { event.preventDefault(); exit(); }
+    };
+    window.addEventListener('keydown', keydown);
+    window.addEventListener('vsread:toggle-focus', toggle);
+    window.addEventListener('vsread:exit-focus', exit);
+    return () => { window.removeEventListener('keydown', keydown); window.removeEventListener('vsread:toggle-focus', toggle); window.removeEventListener('vsread:exit-focus', exit); };
+  }, [focusMode]);
   const writer = useRef<ProgressWriter | undefined>(undefined);
   if (!writer.current) writer.current = new ProgressWriter((id, progress) => request('progress', { id, progress }), error => {
     setSaveState(error ? '保存失败 · 将重试' : '进度已保存');
@@ -60,12 +83,14 @@ export function App() {
     const restored = savedView();
     void request('init', undefined).then(data => {
       setLibrary(data);
+      if (typeof data.initialFocus === 'boolean') setFocusMode(data.initialFocus);
       if (initialToken !== opening.current) return;
       if (data.initialView === 'online') showOnline();
       else if (restored.view === 'online') { setPage('online'); setInitialOnlineBookId(restored.onlineBookId); }
       else if (data.lastBookId && data.books.some(book => book.id === data.lastBookId)) void open(data.lastBookId);
     }).catch(reportError).finally(() => setInitializing(false));
     const update = (event: MessageEvent) => {
+      if (event.data?.event === 'focus' && typeof event.data.enabled === 'boolean') { setFocusMode(event.data.enabled); return; }
       if (event.data?.event === 'navigate' && event.data.view === 'online') { showOnline(); return; }
       if (event.data?.event !== 'library') return;
       const data = event.data.library as Library;
@@ -121,14 +146,15 @@ export function App() {
     catch (error) { reportError(error); }
     finally { setCheckingUpdates(false); }
   };
-  return <div className="app" data-theme={library.settings.theme} style={customThemeStyle(library.settings)} onPointerDownCapture={event => {
+  return <div className="app" data-theme={library.settings.theme} data-focus={focusMode ? 'true' : undefined} style={customThemeStyle(library.settings)} onPointerDownCapture={event => {
     if (settingsVisible && event.target instanceof Element && !event.target.closest('.settings-panel, [data-settings-toggle]')) setSettingsVisible(false);
     if (updatesVisible && event.target instanceof Element && !event.target.closest('.update-panel, [data-update-toggle]')) setUpdatesVisible(false);
   }}>
     <header className="app-header"><button className="brand" onClick={showShelf} aria-label="返回书架" title="VSRead · 青菜阅读"><span className="brand-mark vegetable-mark" aria-hidden="true">🥬</span>VS<span className="brand-read">Read</span><small className="brand-cn">青菜阅读</small></button><span className="header-divider" />
       <div className="header-title">{source ? <><span>{currentBook?.title ?? source.book.title}</span><small>{currentBook?.author || source.book.format.toUpperCase()}</small></> : <span className="muted">{page === 'online' ? '在线书源' : '你的本地阅读空间'}</span>}</div>
-      <div className="header-actions">{(source || page === 'online') && <button className="text-button header-action" onClick={showShelf} title="我的书架" aria-label="我的书架"><Icon name="shelf" /><span>我的书架</span></button>}<button className={`text-button header-action ${page === 'online' ? 'active' : ''}`} onClick={showOnline} aria-label="在线书源"><Icon name="globe" /><span>在线书源</span></button><button data-update-toggle className={`text-button header-action ${updatesVisible ? 'active' : ''}`} onClick={() => { void checkUpdates(); }} disabled={checkingUpdates} aria-label="检查更新"><Icon name="update" /><span>检查更新</span></button><button ref={settingsToggle} data-settings-toggle className={`text-button header-action ${settingsVisible ? 'active' : ''}`} onClick={() => { setUpdatesVisible(false); setSettingsVisible(!settingsVisible); }} title="调整背景、字号与行距" aria-label="阅读设置" aria-controls="reading-settings" aria-expanded={settingsVisible}><Icon name="settings" /><span>阅读设置</span></button></div>
+      <div className="header-actions">{(source || page === 'online') && <button className="text-button header-action" onClick={showShelf} title="我的书架" aria-label="我的书架"><Icon name="shelf" /><span>我的书架</span></button>}<button className={`text-button header-action ${page === 'online' ? 'active' : ''}`} onClick={showOnline} aria-label="在线书源"><Icon name="globe" /><span>在线书源</span></button><button data-update-toggle className={`text-button header-action ${updatesVisible ? 'active' : ''}`} onClick={() => { void checkUpdates(); }} disabled={checkingUpdates} aria-label="检查更新"><Icon name="update" /><span>检查更新</span></button><button ref={settingsToggle} data-settings-toggle className={`text-button header-action ${settingsVisible ? 'active' : ''}`} onClick={() => { setUpdatesVisible(false); setSettingsVisible(!settingsVisible); }} title="调整背景、字号与行距" aria-label="阅读设置" aria-controls="reading-settings" aria-expanded={settingsVisible}><Icon name="settings" /><span>阅读设置</span></button><button className="text-button header-action" onClick={() => setFocusMode(true)} title="隐藏名称、工具栏与目录 · Ctrl+Alt+H" aria-label="专注阅读"><Icon name="focus" /><span>专注阅读</span></button></div>
     </header>
+    {focusMode && <button className="focus-restore icon-button" aria-label="退出专注阅读" title="恢复界面 · Esc / Ctrl+Alt+H" onClick={() => setFocusMode(false)}><Icon name="focus" size={16} /></button>}
     {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setError('')}><Icon name="close" size={15} /></button></div>}
     <main>{initializing ? <div className="initial-loading"><span className="spinner" />正在打开书架…</div> : page === 'online' ? <OnlineHub settings={library.settings} onError={reportError} initialBookId={initialOnlineBookId} /> : source ? <ReaderView key={source.book.id + (source.book.encoding ?? '')} source={source} settings={library.settings} onProgress={onProgress} onMetadata={onMetadata} onError={reportError} onEncoding={encoding => { if (!busy) void changeEncoding(encoding); }} /> : <Bookshelf books={library.books} busy={busy} onOpen={id => void open(id)} onImport={() => void importBooks()} onRemove={id => { void writer.current!.flush().then(() => request('remove', { id })).then(setLibrary).catch(reportError); }} />}</main>
     {(settingsVisible || updatesVisible) && <div className="settings-dismiss" aria-hidden="true" />}

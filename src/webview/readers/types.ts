@@ -13,6 +13,7 @@ export interface ReaderAdapter {
   next(): Promise<void>;
   previous(): Promise<void>;
   goTo(target: string): Promise<void>;
+  scroll(direction: -1 | 1): void;
   update(settings: ReaderSettings): void;
   destroy(): void;
   search?(query: string): Promise<SearchHit[]>;

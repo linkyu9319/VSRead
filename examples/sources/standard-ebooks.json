@@ -1,0 +1,18 @@
+{
+  "bookSourceName": "Standard Ebooks",
+  "bookSourceUrl": "https://standardebooks.org",
+  "enabled": true,
+  "searchUrl": "/ebooks?query={{key}}&sort=relevance",
+  "ruleSearch": {
+    "bookList": ".ebooks-list > li",
+    "name": "p:not(.author) a@text",
+    "author": "p.author@text",
+    "bookUrl": "p:not(.author) a@href"
+  },
+  "ruleToc": {
+    "chapterList": "a[href$=\"/text/single-page\"]",
+    "chapterName": "@text",
+    "chapterUrl": "@href"
+  },
+  "ruleContent": { "content": "body@text" }
+}

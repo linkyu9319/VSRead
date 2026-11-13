@@ -23,6 +23,8 @@ async function mockOnlineHost(page: Page) {
           switch (method) {
             case 'init': result = { version: 1, books: [], settings }; break;
             case 'sources.list': result = state.sources; break;
+            case 'sources.builtin.list': result = []; break;
+            case 'sources.builtin.add': throw new Error('此回归未使用内置书源');
             case 'online.list': result = state.books; break;
             case 'sources.import': {
               const imported = args.url ? [configuredSource] : JSON.parse(args.json);
@@ -71,6 +73,7 @@ async function mockOnlineHost(page: Page) {
             case 'updates.open': (window as any).__releaseOpened = true; break;
             case 'updates.auth': (window as any).__authAction = args.action; break;
             case 'settings': Object.assign(settings, args); break;
+            case 'focus': break;
             default: throw new Error(`未模拟的请求 ${method}`);
           }
           localStorage.setItem('online-fixture', JSON.stringify(state));
@@ -87,6 +90,7 @@ test.beforeEach(async ({ page }) => { await mockOnlineHost(page); await page.got
 test('书源导入、搜索、章节缓存、离线重开与进度恢复', async ({ page }) => {
   await page.getByRole('button', { name: '在线书源', exact: true }).click();
   await expect(page.getByRole('region', { name: '书源管理', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '导入书源', exact: true }).click();
   await page.getByLabel('书源 JSON', { exact: true }).fill(JSON.stringify([source, { name: '脚本书源', unsupported: true }]));
   await page.getByRole('button', { name: '导入书源', exact: true }).click();
   await expect(page.locator('.source-import-report')).toContainText('已导入 1 个书源');
@@ -132,6 +136,7 @@ test('书源导入、搜索、章节缓存、离线重开与进度恢复', async
 
 test('配置链接导入与版本检查入口', async ({ page }) => {
   await page.getByRole('button', { name: '在线书源', exact: true }).click();
+  await page.getByRole('button', { name: '导入书源', exact: true }).click();
   await page.getByRole('tab', { name: '配置链接', exact: true }).click();
   await page.getByLabel('书源配置链接').fill('https://fiction.example/sources.json');
   await page.getByRole('button', { name: '导入书源', exact: true }).click();
@@ -148,12 +153,104 @@ test('配置链接导入与版本检查入口', async ({ page }) => {
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
-test('公版示例只导入配置，不自动搜索或下载', async ({ page }) => {
+async function openSavedOnlineBook(page: Page, chapter = 0, scroll = 0) {
+  const book = {
+    id: 'f'.repeat(64), sourceId: source.id, title: '星海在线', author: '测试作者', url: 'https://fiction.example/book/one',
+    addedAt: '2026-11-13T00:00:00.000Z', cachedChapters: [0, 1, 2],
+    chapters: ['第一章 星海', '第二章 远航', '第三章 归途'].map((title, index) => ({ id: String(index + 1).repeat(64), title, url: `https://fiction.example/chapter/${index + 1}` })),
+    progress: { chapter, scroll, updatedAt: '2026-11-13T00:00:00.000Z' },
+  };
+  await page.evaluate(({ source, book }) => localStorage.setItem('online-fixture', JSON.stringify({ sources: [source], books: [book] })), { source, book });
+  await page.reload();
   await page.getByRole('button', { name: '在线书源', exact: true }).click();
-  await page.getByRole('button', { name: '公版示例', exact: true }).click();
-  await expect(page.locator('.source-import-report')).toContainText('已导入 1 个书源');
-  const calls = await page.evaluate(() => (window as any).__onlineRpc as { method: string; args?: { json?: string } }[]);
-  const imported = calls.find(call => call.method === 'sources.import');
-  expect(JSON.parse(imported!.args!.json!).bookSourceName).toBe('Project Gutenberg');
-  expect(calls.some(call => call.method === 'online.search' || call.method === 'online.chapter')).toBe(false);
+  await page.getByRole('region', { name: '在线书架', exact: true }).getByRole('button', { name: '继续阅读', exact: true }).click();
+  await expect(page.locator('.online-chapter-content h3')).toHaveText(book.chapters[chapter].title);
+  await expect(page.getByRole('button', { name: '刷新本章', exact: true })).toBeEnabled();
+}
+
+test('在线章节上下键滚动且输入框保留按键行为', async ({ page }) => {
+  await openSavedOnlineBook(page, 0, .35);
+  const surface = page.getByTestId('online-reading-surface');
+  const before = await surface.evaluate(element => element.scrollTop);
+  expect(before).toBeGreaterThan(300);
+  await surface.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBeGreaterThan(before + 20);
+  const down = await surface.evaluate(element => element.scrollTop);
+  await page.keyboard.press('ArrowUp');
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBeLessThan(down - 20);
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第一章 星海');
+
+  const cacheCount = page.getByLabel('缓存章节数');
+  await cacheCount.focus();
+  const atInput = await surface.evaluate(element => element.scrollTop);
+  await page.keyboard.press('ArrowUp');
+  await expect(cacheCount).toHaveValue('6');
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第一章 星海');
+  expect(await surface.evaluate(element => element.scrollTop)).toBe(atInput);
+  await page.getByLabel('筛选在线章节').fill('星海');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第一章 星海');
+  expect(await surface.evaluate(element => element.scrollTop)).toBe(atInput);
+});
+
+test('在线章节末尾连续切章回到章首，重开才恢复保存位置', async ({ page }) => {
+  await openSavedOnlineBook(page, 0, 1);
+  const surface = page.getByTestId('online-reading-surface');
+  await expect.poll(() => surface.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThan(2);
+  await page.getByRole('button', { name: '下一章', exact: true }).click();
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第二章 远航');
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBe(0);
+  await expect(page.locator('.online-reader .page-controls')).toContainText('进度已保存');
+  const newChapterPositions = await page.evaluate(() => (window as any).__onlineRpc.filter((call: any) => call.method === 'online.progress' && call.args.chapter === 1).map((call: any) => call.args.scroll));
+  expect(newChapterPositions.length).toBeGreaterThan(0);
+  expect(newChapterPositions.every((scroll: number) => scroll === 0)).toBe(true);
+  await surface.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await surface.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第三章 归途');
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBe(0);
+  await surface.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await page.keyboard.press('ArrowLeft');
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第二章 远航');
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBe(0);
+  await surface.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await page.keyboard.press('PageDown');
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第三章 归途');
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBe(0);
+  await surface.evaluate(element => { element.scrollTop = 620; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await expect(page.locator('.online-reader .page-controls')).toContainText('进度已保存');
+  await page.getByRole('button', { name: '在线书架', exact: true }).click();
+  await page.getByRole('region', { name: '在线书架', exact: true }).getByRole('button', { name: '继续阅读', exact: true }).click();
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第三章 归途');
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBeGreaterThan(580);
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBeLessThan(660);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('在线专注模式改变视口后保持章节位置并支持键盘切章', async ({ page }) => {
+  await openSavedOnlineBook(page, 1, .4);
+  const surface = page.getByTestId('online-reading-surface');
+  const ratio = () => surface.evaluate(element => element.scrollTop / Math.max(1, element.scrollHeight - element.clientHeight));
+  await expect.poll(ratio).toBeGreaterThan(.395);
+  await expect.poll(ratio).toBeLessThan(.405);
+  await page.getByRole('button', { name: '专注阅读', exact: true }).click();
+  await expect(page.locator('.app')).toHaveAttribute('data-focus', 'true');
+  await expect(page.locator('.online-toc')).not.toBeVisible();
+  await expect.poll(ratio).toBeGreaterThan(.395);
+  await expect.poll(ratio).toBeLessThan(.405);
+  await surface.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect.poll(ratio).toBeGreaterThan(.405);
+  await surface.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第三章 归途');
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.app')).not.toHaveAttribute('data-focus', 'true');
+  await expect(page.locator('.online-toc')).toBeVisible();
+  await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBe(0);
+  await expect(page.getByRole('alert')).toHaveCount(0);
 });

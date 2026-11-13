@@ -4,6 +4,7 @@ import type { OpenBook, ReaderSettings, ReadingPosition, TocItem } from '../../s
 import { progress, type ReaderAdapter, type ReaderEvents, type SearchHit } from './types';
 import { acquirePdf, type PdfResource } from './pdfResources';
 import type { PdfLease } from './PdfSessionCache';
+import { resetReadingScroll, scrollReadingSurface, stopReadingScroll } from './readerScroll';
 
 type TextContent = Awaited<ReturnType<PDFPageProxy['getTextContent']>>;
 
@@ -84,6 +85,7 @@ export class PdfReader implements ReaderAdapter {
     this.textLayer?.cancel();
     clearTimeout(this.prefetchTimer);
     this.rendering = true;
+    stopReadingScroll(this.container);
     this.pageNumber = Math.max(1, Math.min(pdf.numPages, number));
     let unfinished: RenderedPage | undefined;
     try {
@@ -141,7 +143,7 @@ export class PdfReader implements ReaderAdapter {
   private display(page: RenderedPage, key: string, scroll: number): void {
     this.displayedKey = key;
     this.container.replaceChildren(page.element);
-    this.container.scrollTop = Math.min(1, Math.max(0, scroll)) * Math.max(0, this.container.scrollHeight - this.container.clientHeight);
+    resetReadingScroll(this.container, Math.min(1, Math.max(0, scroll)) * Math.max(0, this.container.scrollHeight - this.container.clientHeight));
     this.rendering = false;
     this.emit();
     this.prefetchTimer = setTimeout(() => { void this.prepareNextPage(); }, 200);
@@ -192,6 +194,9 @@ export class PdfReader implements ReaderAdapter {
     this.events.progress(progress({ format: 'pdf', page: this.pageNumber, scroll: this.scrollRatio() }, (this.pageNumber - 1 + this.scrollRatio()) / this.document.numPages));
   }
   private onScroll = () => { cancelAnimationFrame(this.frame); this.frame = requestAnimationFrame(() => this.emit()); };
+  scroll(direction: -1 | 1): void {
+    if (!this.destroyed && !this.rendering && this.document) scrollReadingSurface(this.container, direction);
+  }
   async next(): Promise<void> { if (this.document && this.pageNumber < this.document.numPages) await this.show(this.pageNumber + 1); }
   async previous(): Promise<void> { if (this.pageNumber > 1) await this.show(this.pageNumber - 1); }
   async goTo(target: string): Promise<void> {

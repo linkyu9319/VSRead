@@ -66,9 +66,13 @@
         "icon": "$(add)"
       },
       { "command": "vsread.sources", "title": "VSRead: 在线书源", "icon": "$(globe)" },
+      { "command": "vsread.toggleFocusMode", "title": "VSRead: 切换专注阅读", "icon": "$(screen-full)" },
       { "command": "vsread.checkUpdates", "title": "VSRead: 检查更新", "icon": "$(versions)" },
       { "command": "vsread.configureUpdateToken", "title": "VSRead: 配置更新访问令牌" },
       { "command": "vsread.clearUpdateToken", "title": "VSRead: 清除更新访问令牌" }
+    ],
+    "keybindings": [
+      { "command": "vsread.toggleFocusMode", "key": "ctrl+alt+h", "mac": "cmd+alt+h", "when": "vsread.readerActive" }
     ],
     "menus": {
       "explorer/context": [

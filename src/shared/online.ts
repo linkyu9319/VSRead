@@ -8,6 +8,9 @@ export interface BookSource {
   toc: { chapterList: string; chapterName: string; chapterUrl: string };
   content: { content: string };
 }
+export interface BuiltinSourceSummary {
+  id: string; name: string; description: string; language: string; sourceId: string; searchUrl: string;
+}
 export interface SourceImportResult { sources: BookSource[]; imported: number; rejected: { name: string; reason: string }[] }
 export interface OnlineSearchResult { sourceId: string; title: string; author?: string; url: string }
 export interface OnlineChapter { id: string; title: string; url: string }
@@ -26,6 +29,8 @@ export interface UpdateStatus {
 }
 
 export interface OnlineRequests {
+  'sources.builtin.list': { args: undefined; result: BuiltinSourceSummary[] };
+  'sources.builtin.add': { args: { id: string }; result: BookSource[] };
   'sources.list': { args: undefined; result: BookSource[] };
   'sources.import': { args: { json?: string; url?: string }; result: SourceImportResult };
   'sources.toggle': { args: { id: string; enabled: boolean }; result: BookSource[] };

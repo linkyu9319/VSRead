@@ -29,7 +29,7 @@ export interface TextChunk { text: string; part: TextPart }
 export interface BinaryChunk { base64: string; total: number }
 
 export interface Requests extends OnlineRequests {
-  init: { args: undefined; result: Library & { initialView?: 'online' } };
+  init: { args: undefined; result: Library & { initialView?: 'online'; initialFocus?: boolean } };
   import: { args: undefined; result: Library };
   open: { args: { id: string }; result: OpenBook };
   text: { args: { id: string; part: number }; result: TextChunk };
@@ -39,6 +39,7 @@ export interface Requests extends OnlineRequests {
   metadata: { args: { id: string; title?: string; author?: string; cover?: string }; result: void };
   encoding: { args: { id: string; encoding: TextEncoding }; result: OpenBook };
   remove: { args: { id: string }; result: Library };
+  focus: { args: { enabled: boolean }; result: void };
 }
 export interface RpcRequest { id: string; method: keyof Requests; args?: unknown }
 export type RpcResponse = { id: string; result?: unknown; error?: string };

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReaderSettings } from '../../shared/model';
-import type { BookSource, OnlineBookRecord, OnlineSearchResult, SourceImportResult } from '../../shared/online';
+import type { BookSource, BuiltinSourceSummary, OnlineBookRecord, OnlineSearchResult, SourceImportResult } from '../../shared/online';
 import { formatPercentage } from '../../shared/format';
 import { rememberOnline, request } from '../bridge';
 import { Icon } from './Icon';
@@ -11,6 +11,8 @@ import '../online.css';
 
 export function OnlineHub({ settings, onError, initialBookId }: { settings: ReaderSettings; onError(error: unknown): void; initialBookId?: string }) {
   const [sources, setSources] = useState<BookSource[]>([]);
+  const [builtins, setBuiltins] = useState<BuiltinSourceSummary[]>([]);
+  const [importExpanded, setImportExpanded] = useState(false);
   const [books, setBooks] = useState<OnlineBookRecord[]>([]);
   const [opened, setOpened] = useState<OnlineBookRecord>();
   const [loading, setLoading] = useState(true);
@@ -22,19 +24,23 @@ export function OnlineHub({ settings, onError, initialBookId }: { settings: Read
   const pendingRef = useRef('');
   useEffect(() => {
     active.current = true;
-    void Promise.allSettled([request('sources.list', undefined), request('online.list', undefined)]).then(async ([sourceResult, bookResult]) => {
-      if (!active.current) return;
+    const token = ++opening.current;
+    setLoading(true);
+    void Promise.allSettled([request('sources.list', undefined), request('online.list', undefined), request('sources.builtin.list', undefined)]).then(async ([sourceResult, bookResult, builtinResult]) => {
+      if (!active.current || token !== opening.current) return;
       if (sourceResult.status === 'fulfilled') setSources(sourceResult.value);
       else onError(sourceResult.reason);
       if (bookResult.status === 'fulfilled') setBooks(bookResult.value);
       else onError(bookResult.reason);
+      if (builtinResult.status === 'fulfilled') setBuiltins(builtinResult.value);
+      else onError(builtinResult.reason);
       if (initialBookId && bookResult.status === 'fulfilled' && bookResult.value.some(book => book.id === initialBookId)) {
         try {
           const book = await request('online.open', { id: initialBookId });
-          if (active.current) { rememberOnline(book.id); setOpened(book); }
-        } catch (error) { if (active.current) onError(error); }
+          if (active.current && token === opening.current) { rememberOnline(book.id); setOpened(book); }
+        } catch (error) { if (active.current && token === opening.current) onError(error); }
       }
-      if (!active.current) return;
+      if (!active.current || token !== opening.current) return;
       setLoading(false);
     });
     return () => { active.current = false; opening.current++; };
@@ -65,6 +71,13 @@ export function OnlineHub({ settings, onError, initialBookId }: { settings: Read
     if (active.current) setSources(result.sources);
     return result;
   });
+  const useBuiltin = (id: string): Promise<BookSource | undefined> => perform('sources', async () => {
+    const builtin = builtins.find(item => item.id === id);
+    if (!builtin) throw new Error('内置书源不存在');
+    const next = await request('sources.builtin.add', { id });
+    if (active.current) setSources(next);
+    return next.find(source => source.id === builtin.sourceId);
+  });
   const toggleSource = (source: BookSource) => {
     if (pending) return;
     // 控件先响应用户操作；持久化失败再恢复，避免受控 checkbox 在 RPC 返回前闪回。
@@ -86,14 +99,14 @@ export function OnlineHub({ settings, onError, initialBookId }: { settings: Read
   return <div className="online-hub">
     <div className="online-intro"><span className="eyebrow">ONLINE SOURCES</span><h1>在线书源</h1><p>自选书源，按章阅读；已缓存的内容可离线打开。</p></div>
     {message && <p className="online-message" role="status">{message}</p>}
-    <OnlineSources sources={sources} busy={!!pending} onImport={importSources} onToggle={toggleSource} onRemove={source => { void perform('sources', async () => { const next = await request('sources.remove', { id: source.id }); if (active.current) setSources(next); }); }} />
-    <OnlineSearch sources={sources} books={books} pending={pending} onAdd={addBook} onOpen={book => void openBook(book)} onError={onError} />
+    <OnlineSearch sources={sources} builtins={builtins} books={books} pending={pending} onUseBuiltin={useBuiltin} onImport={() => setImportExpanded(true)} onAdd={addBook} onOpen={book => void openBook(book)} onError={onError} />
+    <OnlineSources sources={sources} busy={!!pending} expanded={importExpanded} onExpandedChange={setImportExpanded} onImport={importSources} onToggle={toggleSource} onRemove={source => { void perform('sources', async () => { const next = await request('sources.remove', { id: source.id }); if (active.current) setSources(next); }); }} />
     <section className="online-library" aria-label="在线书架"><div className="online-section-heading"><div><h2>在线书架 <span>{books.length}</span></h2><p>目录与进度保存在本机，正文随阅读自动缓存。</p></div></div>
       {recent.length ? <div className="online-book-list">{recent.map(book => {
         const source = sources.find(source => source.id === book.sourceId);
         const percentage = book.chapters.length ? ((book.progress?.chapter ?? 0) + (book.progress?.scroll ?? 0)) / book.chapters.length : 0;
         return <div className="online-book-card" key={book.id}><div className="online-book-top"><div><span className="online-tag">{source?.name ?? '书源已移除'}</span><h3>{book.title}</h3><p>{book.author || '作者未注明'}</p></div><Icon name="book" size={30} /></div><div className="book-progress"><span style={{ width: `${Math.min(1, Math.max(0, percentage)) * 100}%` }} /></div><div className="online-book-details"><span>已读 {formatPercentage(percentage)}</span><span>已缓存 {book.cachedChapters.length} / {book.chapters.length} 章</span></div><div className="online-book-actions"><button className="text-button" disabled={!!pending} onClick={() => void openBook(book)}><Icon name="book" size={15} />{pending === `open:${book.id}` ? '打开中…' : book.progress ? '继续阅读' : '开始阅读'}</button>{removing === book.id ? <div className="inline-confirm"><span>移除书籍及缓存？</span><button className="text-button danger-button" disabled={!!pending} onClick={() => { void perform(`remove:${book.id}`, async () => { const result = await request('online.remove', { id: book.id }); if (active.current) { setBooks(result); setRemoving(''); } }); }}>确定</button><button className="text-button" onClick={() => setRemoving('')}>取消</button></div> : <button className="icon-button" disabled={!!pending} title={`移除 ${book.title}`} aria-label={`移除在线书籍 ${book.title}`} onClick={() => setRemoving(book.id)}><Icon name="trash" size={15} /></button>}</div></div>;
-      })}</div> : <p className="online-empty-note">在线书架还是空的。导入书源，搜索并加入第一本书。</p>}
+      })}</div> : <p className="online-empty-note">在线书架还是空的。在上方搜索书籍，加入书架后即可阅读。</p>}
     </section>
   </div>;
 }

@@ -1,9 +1,10 @@
 import path from 'node:path';
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import type { BookSource, OnlineBookRecord, OnlineChapter, OnlineChapterContent, OnlineSearchResult, SourceImportResult } from '../../shared/online';
+import type { BookSource, BuiltinSourceSummary, OnlineBookRecord, OnlineChapter, OnlineChapterContent, OnlineSearchResult, SourceImportResult } from '../../shared/online';
 import { boundedNumber, isRecord } from '../../shared/validation';
 import { requestText, type TextFetcher } from './network';
 import { extract, loadHtml, normalizeSource, resolveSourceUrl, select, stableId } from './rules';
+import { getBuiltinSource, listBuiltinSources } from './builtins';
 
 interface StoredBook extends OnlineBookRecord { cacheSizes: Record<string, number> }
 interface State { version: 1; sources: BookSource[]; books: StoredBook[] }
@@ -19,6 +20,7 @@ export class OnlineLibrary {
   private activeChapters = new Map<string, Promise<OnlineChapterContent>>();
   private bookOperations = new Map<string, Promise<unknown>>();
   private cacheWrites = Promise.resolve();
+  private sourceOperations = Promise.resolve();
   constructor(readonly root: string, options: { fetchText?: TextFetcher } = {}) { this.fetchText = options.fetchText ?? requestText; }
 
   async load(): Promise<void> {
@@ -38,6 +40,19 @@ export class OnlineLibrary {
     if (damaged) throw new Error('在线书库索引及备份无法读取，请先备份在线数据目录');
   }
   listSources(): BookSource[] { return clone(this.state.sources); }
+  listBuiltinSources(): BuiltinSourceSummary[] { return listBuiltinSources(); }
+  async addBuiltinSource(id: string): Promise<BookSource[]> {
+    const source = getBuiltinSource(id);
+    return this.withSources(async () => {
+      const existing = this.state.sources.find(item => item.id === source.id);
+      if (existing?.enabled) return this.listSources();
+      const next = existing
+        ? this.state.sources.map(item => item.id === source.id ? { ...item, enabled: true } : item)
+        : [...this.state.sources, source];
+      await this.commitSources(next);
+      return this.listSources();
+    });
+  }
   listBooks(): OnlineBookRecord[] { return this.state.books.map(book => this.publicBook(book)); }
 
   async importSources(input: { json?: string; url?: string }): Promise<SourceImportResult> {
@@ -54,24 +69,27 @@ export class OnlineLibrary {
       try { accepted.push(normalizeSource(value)); }
       catch (error) { rejected.push({ name: isRecord(value) ? String(value.name ?? value.bookSourceName ?? '未命名书源').slice(0, 200) : '无效书源', reason: error instanceof Error ? error.message : '规则无效' }); }
     }
-    const next = new Map(this.state.sources.map(source => [source.id, source]));
-    for (const source of accepted) next.set(source.id, source);
-    if (next.size > 200) throw new Error('最多保存 200 个书源，请先移除不需要的书源');
-    this.state.sources = [...next.values()];
-    await this.save();
-    return { sources: this.listSources(), imported: new Set(accepted.map(source => source.id)).size, rejected };
+    return this.withSources(async () => {
+      const next = new Map(this.state.sources.map(source => [source.id, source]));
+      for (const source of accepted) next.set(source.id, source);
+      await this.commitSources([...next.values()]);
+      return { sources: this.listSources(), imported: new Set(accepted.map(source => source.id)).size, rejected };
+    });
   }
   async toggleSource(id: string, enabled: boolean): Promise<BookSource[]> {
     if (typeof enabled !== 'boolean') throw new Error('书源状态无效');
-    this.source(id).enabled = enabled;
-    await this.save();
-    return this.listSources();
+    return this.withSources(async () => {
+      this.source(id);
+      await this.commitSources(this.state.sources.map(source => source.id === id ? { ...source, enabled } : source));
+      return this.listSources();
+    });
   }
   async removeSource(id: string): Promise<BookSource[]> {
-    this.source(id);
-    this.state.sources = this.state.sources.filter(source => source.id !== id);
-    await this.save();
-    return this.listSources();
+    return this.withSources(async () => {
+      this.source(id);
+      await this.commitSources(this.state.sources.filter(source => source.id !== id));
+      return this.listSources();
+    });
   }
 
   async search(sourceId: string, query: string, page = 1): Promise<OnlineSearchResult[]> {
@@ -190,7 +208,24 @@ export class OnlineLibrary {
       return this.listBooks();
     });
   }
-  flush(): Promise<void> { return this.writes; }
+  flush(): Promise<void> { return Promise.all([this.sourceOperations, this.writes]).then(() => undefined); }
+
+  private withSources<T>(operation: () => Promise<T>): Promise<T> {
+    const pending = this.sourceOperations.then(operation);
+    this.sourceOperations = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+  private async commitSources(next: BookSource[]): Promise<void> {
+    if (next.length > 200) throw new Error('最多保存 200 个书源，请先移除不需要的书源');
+    const previous = this.state.sources;
+    this.state.sources = next;
+    try { await this.save(); }
+    catch (error) {
+      // 书源变更串行提交；失败恢复原数组，不会覆盖随后排队的导入、启停或移除。
+      this.state.sources = previous;
+      throw error;
+    }
+  }
 
   private request(url: string, maxBytes?: number) {
     const operation = this.network.then(() => this.fetchText(url, { maxBytes }));

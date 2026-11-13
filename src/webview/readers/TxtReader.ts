@@ -1,6 +1,7 @@
 import type { OpenBook, ReaderSettings, ReadingPosition, TextIndex } from '../../shared/model';
 import { request } from '../bridge';
 import { progress, type ReaderAdapter, type ReaderEvents } from './types';
+import { resetReadingScroll, scrollReadingSurface, stopReadingScroll } from './readerScroll';
 
 export class TxtReader implements ReaderAdapter {
   private source!: OpenBook;
@@ -14,6 +15,8 @@ export class TxtReader implements ReaderAdapter {
   private resize: ResizeObserver;
   private lastOffset = 0;
   private frame = 0;
+  private viewportWidth = 0;
+  private viewportHeight = 0;
 
   constructor(private container: HTMLElement, private settings: ReaderSettings, private events: ReaderEvents) {
     this.article = document.createElement('article');
@@ -21,7 +24,17 @@ export class TxtReader implements ReaderAdapter {
     container.className = 'engine-surface txt-surface';
     container.append(this.article);
     container.addEventListener('scroll', this.onScroll, { passive: true });
-    this.resize = new ResizeObserver(() => { if (!this.loading && this.text) this.restore(this.lastOffset); });
+    this.viewportWidth = container.clientWidth;
+    this.viewportHeight = container.clientHeight;
+    this.resize = new ResizeObserver(() => {
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      const changed = width !== this.viewportWidth || height !== this.viewportHeight;
+      this.viewportWidth = width;
+      this.viewportHeight = height;
+      // 首次观察通知不代表尺寸改变，避免首次显示后又把章首对齐到正文行。
+      if (changed && !this.loading && this.text) this.restore(this.lastOffset);
+    });
     this.resize.observe(container);
     this.update(settings);
   }
@@ -38,13 +51,14 @@ export class TxtReader implements ReaderAdapter {
     if (!this.index.parts[index] || this.destroyed) return;
     const generation = ++this.generation;
     this.loading = true;
+    stopReadingScroll(this.container);
     try {
       const chunk = await request('text', { id: this.source.book.id, part: index });
       if (this.destroyed || generation !== this.generation) return;
       this.current = index;
       this.text = document.createTextNode(chunk.text);
       this.article.replaceChildren(this.text);
-      this.container.scrollTop = 0;
+      resetReadingScroll(this.container);
       if (bottom) this.container.scrollTop = this.container.scrollHeight;
       else this.restore(offset ?? chunk.part.start);
       this.loading = false;
@@ -53,7 +67,9 @@ export class TxtReader implements ReaderAdapter {
   }
   private restore(offset: number): void {
     if (!this.text || !this.index) return;
-    const local = Math.max(0, Math.min(this.text.length - 1, offset - this.index.parts[this.current].start));
+    const start = this.index.parts[this.current].start;
+    if (offset <= start) { resetReadingScroll(this.container); this.lastOffset = start; return; }
+    const local = Math.max(0, Math.min(this.text.length - 1, offset - start));
     const range = document.createRange();
     range.setStart(this.text, local);
     range.setEnd(this.text, Math.min(local + 1, this.text.length));
@@ -63,6 +79,7 @@ export class TxtReader implements ReaderAdapter {
   }
   private offset(): number {
     if (!this.text) return 0;
+    if (this.container.scrollTop < 2) return this.index.parts[this.current].start;
     const bounds = this.article.getBoundingClientRect();
     const viewport = this.container.getBoundingClientRect();
     const caretDocument = document as Document & { caretRangeFromPoint(x: number, y: number): Range | null };
@@ -91,12 +108,16 @@ export class TxtReader implements ReaderAdapter {
     else { this.container.scrollTop -= this.container.clientHeight * 0.88; this.emit(); }
   }
   async goTo(target: string): Promise<void> { await this.show(Number(target)); }
+  scroll(direction: -1 | 1): void {
+    if (!this.destroyed && !this.loading && this.text) scrollReadingSurface(this.container, direction, this.settings.fontSize * this.settings.lineHeight);
+  }
   update(settings: ReaderSettings): void {
+    const typographyChanged = this.settings.fontSize !== settings.fontSize || this.settings.lineHeight !== settings.lineHeight || this.settings.fontFamily !== settings.fontFamily;
     this.settings = settings;
     this.article.style.fontSize = `${settings.fontSize}px`;
     this.article.style.lineHeight = String(settings.lineHeight);
     this.article.style.fontFamily = settings.fontFamily === 'serif' ? '"Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", SimSun, serif' : 'system-ui, "Microsoft YaHei", sans-serif';
-    if (this.text) this.restore(this.lastOffset);
+    if (this.text && typographyChanged) this.restore(this.lastOffset);
   }
   destroy(): void {
     // React 清理时容器可能已脱离 DOM，此时重新计算滚动偏移会覆盖有效进度。
