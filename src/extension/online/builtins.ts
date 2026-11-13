@@ -1,5 +1,8 @@
 import type { BookSource, BuiltinSourceSummary } from '../../shared/online';
 import { normalizeSource } from './rules';
+import kuwo from '../../../examples/sources/kuwo.json';
+import aixiashu from '../../../examples/sources/aixiashu.json';
+import xiashukan from '../../../examples/sources/xiashukan.json';
 
 interface Builtin { summary: BuiltinSourceSummary; source: BookSource }
 
@@ -11,6 +14,33 @@ const gutenberg = {
 };
 
 const definitions = [
+  {
+    id: 'kuwo', name: '酷我小说', language: '中文',
+    description: '提供玄幻、都市、言情等长篇网文，支持章节阅读与本地缓存。',
+    config: kuwo,
+  },
+  {
+    id: '00shuge', name: '零零小说', language: '中文',
+    description: '现代中文网文，支持搜索、章节目录与正文；部分作品可能缺章。',
+    config: {
+      bookSourceName: '零零小说', bookSourceUrl: 'https://www.00shuge.com', enabled: true,
+      searchUrl: '/modules/article/search.php?q={{key}}',
+      ruleSearch: { bookList: 'table.grid tr:has(td)', name: 'td:nth-child(1) a@text', author: 'td:nth-child(3)@text', bookUrl: 'td:nth-child(1) a@href' },
+      ruleBookInfo: { name: 'meta[property="og:novel:book_name"]@content', author: 'meta[property="og:novel:author"]@content' },
+      ruleToc: { chapterList: '#list dd a', chapterName: '@text', chapterUrl: '@href' },
+      ruleContent: { content: '#content@html' },
+    },
+  },
+  {
+    id: 'aixiashu', name: '爱下书吧', language: '中文',
+    description: '中文网文书库，支持书名搜索、章节目录和正文阅读。',
+    config: aixiashu,
+  },
+  {
+    id: 'xiashukan', name: '下书看', language: '中文',
+    description: '提供玄幻、都市、同人等中文网文，目录按正文顺序排列。',
+    config: xiashukan,
+  },
   {
     id: 'jingzhi-public', name: '经致文学 · 公开章节', language: '中文',
     description: '中文原创小说站，仅列出无需登录的公开章节，不包含 VIP 章节。',

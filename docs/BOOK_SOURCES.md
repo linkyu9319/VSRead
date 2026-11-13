@@ -1,6 +1,6 @@
 # 在线书源
 
-VSRead 通过可配置的 HTML 规则读取网站。网络请求由 Extension Host 完成；页面脚本不会执行，阅读区仅展示提取后的纯文本。
+VSRead 通过可配置的 HTML 或 JSON 规则读取网站。网络请求由 Extension Host 完成；页面脚本不会执行，阅读区仅展示提取后的纯文本。
 
 ## 搜索与内置来源
 
@@ -8,6 +8,10 @@ VSRead 通过可配置的 HTML 规则读取网站。网络请求由 Extension Ho
 
 | 来源 | 内容与限制 | 搜索示例 |
 | --- | --- | --- |
+| 酷我小说 | 玄幻、都市、言情等网文，公开 JSON 接口 | `系统` |
+| 零零小说 | 中文网文，单页章节目录 | `诡秘之主` |
+| 爱下书吧 | 中文网文，单页章节目录 | `诡秘之主` |
+| 下书看 | 中文网文及同人作品，单页章节目录 | `狐妖` |
 | 经致文学 · 公开章节 | 中文原创小说，只列出无需登录的公开章节 | `三国` |
 | Project Gutenberg · 中文 | 中文经典作品，整书显示为一个全文条目 | `論語` |
 | Project Gutenberg | 多语言图书，整书显示为一个全文条目 | `Pride and Prejudice` |
@@ -15,11 +19,13 @@ VSRead 通过可配置的 HTML 规则读取网站。网络请求由 Extension Ho
 
 Gutenberg 的中文和多语言选项属于同一平台的不同目录。整书正文仍受单页 2 MB 限制，较大作品可能无法读取；网站改版或网络异常会影响搜索和阅读，已缓存章节仍可离线使用。
 
+网文来源的收录及章节完整性由站点决定，同一本书在不同来源可能缺章或更新不同步。部分站点仅提供 HTTP；来源不需要用户账号，VSRead 不会向这些站点发送 IDE 或 GitHub 凭据。
+
 ## 自定义导入
 
 点击搜索区的“新增书源”或下方“导入书源”，粘贴书源 JSON 或填写 JSON 订阅地址。支持单个对象和对象数组；每次最多导入 200 个书源。导入结果会逐项报告不支持的规则。书源可以停用或移除。
 
-内置配置也提供为 [经致文学](../examples/sources/jingzhi-public.json)、[Gutenberg 中文](../examples/sources/gutenberg-zh.json)、[Gutenberg 多语言](../examples/sources/gutenberg.json)、[Standard Ebooks](../examples/sources/standard-ebooks.json) 示例，均经过现有声明式解析器验证。Gutenberg 与 Standard Ebooks 不拆分页内章节，也不提供搜索翻页。
+内置配置同时提供 [酷我小说](../examples/sources/kuwo.json)、[零零小说](../examples/sources/00shuge.json)、[爱下书吧](../examples/sources/aixiashu.json)、[下书看](../examples/sources/xiashukan.json)、[经致文学](../examples/sources/jingzhi-public.json)、[Gutenberg 中文](../examples/sources/gutenberg-zh.json)、[Gutenberg 多语言](../examples/sources/gutenberg.json)、[Standard Ebooks](../examples/sources/standard-ebooks.json) 示例。Gutenberg 与 Standard Ebooks 不拆分页内章节，也不提供搜索翻页。
 
 ## 格式
 
@@ -30,15 +36,19 @@ Gutenberg 的中文和多语言选项属于同一平台的不同目录。整书�
 | `bookSourceName` / `bookSourceUrl` | 名称与基础网址 |
 | `searchUrl` | GET 搜索地址，支持 `{{key}}` 和 `{{page}}` |
 | `ruleSearch` | `bookList`、`name`、`author`、`bookUrl` |
-| `ruleBookInfo` | 可选的 `name`、`author`、`tocUrl` |
+| `ruleBookInfo` | 可选的 `name`、`author`、`tocUrl`，JSON 可用 `init` 指定详情根节点 |
 | `ruleToc` | `chapterList`、`chapterName`、`chapterUrl` |
 | `ruleContent` | `content` |
 
 选择器使用 CSS；如 `.book-list a@href`、`.title@text`、`#content@html`。`@html` 提取后仍会转换成纯文本并保留段落。`@text` / `@textNodes` 读取文本，`@href`、`@src`、`@content`、`@title` 和 `@data-*` 读取属性。兼容常见的 `class.`、`id.`、`tag.` 前缀与数字索引，例如 `class.book@tag.a.0@href`。
 
-不支持 JavaScript、XPath、JSONPath、POST、登录/请求头规则、正则替换和目录/正文多页拼接。含这些必要规则的书源会被拒绝，不能视为完整 Legado 引擎兼容。字段设计参考 [LegadoC 的公开书源模型](https://github.com/CCSSNE/legadoC/blob/own/app/src/main/java/io/legado/app/data/entities/BookSource.kt)，解析逻辑独立实现。
+JSON 来源可以显式设置 `ruleType: "json"`；搜索列表以 `$` 开头时也会自动识别。路径支持 `$.data.title`、`$.data[0]`、`$.data[*]`，网址可写成 `/books/{{$.book_id}}`，模板字段会进行 URL 编码。参考酷我示例；长数字 ID 应由接口以字符串返回，避免精度丢失。
 
-书源调研参考 [aoaostar/legado](https://github.com/aoaostar/legado) 的公开目录；内置选择器按目标站点当前 HTML 独立编写，没有引入其他阅读器的脚本执行引擎。
+接口可配置 `jsonResponse: {"successPath":"$.code","successValue":200}` 校验业务成功状态。失败响应不会写入正文缓存；酷我内置配置已启用此校验。其他接口按各自返回格式配置，成功值不限定为数字 200。
+
+不支持 JavaScript、XPath、JSON 路径过滤/递归表达式、POST、登录/请求头规则、正则替换和目录/正文多页拼接。含这些必要规则的书源会被拒绝，不能视为完整 Legado 引擎兼容。字段设计参考 [LegadoC 的公开书源模型](https://github.com/CCSSNE/legadoC/blob/own/app/src/main/java/io/legado/app/data/entities/BookSource.kt)，解析逻辑独立实现。
+
+书源调研参考 [aoaostar/legado](https://github.com/aoaostar/legado)、[XIU2/Yuedu](https://github.com/XIU2/Yuedu) 和 [tickmao/Novel](https://github.com/tickmao/Novel) 的公开目录；规则按目标站点当前响应独立编写，没有引入其他阅读器的脚本执行引擎。
 
 ## 阅读与缓存
 

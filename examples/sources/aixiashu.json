@@ -1,0 +1,22 @@
+{
+  "bookSourceName": "爱下书吧",
+  "bookSourceUrl": "http://www.aixiashu.la/",
+  "enabled": true,
+  "searchUrl": "/modules/article/search.php?searchkey={{key}}&searchtype=articlename",
+  "ruleSearch": {
+    "bookList": "table.grid tr:has(td)",
+    "name": "td:nth-child(1) a@text",
+    "author": "td:nth-child(3)@text",
+    "bookUrl": "td:nth-child(1) a@href"
+  },
+  "ruleBookInfo": {
+    "name": "meta[property=\"og:novel:book_name\"]@content",
+    "author": "meta[property=\"og:novel:author\"]@content"
+  },
+  "ruleToc": {
+    "chapterList": "#list dl > dt:nth-of-type(2) ~ dd",
+    "chapterName": "a@text",
+    "chapterUrl": "a@href"
+  },
+  "ruleContent": { "content": "#content@html" }
+}

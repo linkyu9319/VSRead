@@ -31,9 +31,9 @@
 
 ## 在线书源
 
-顶部搜索下拉框提供经致文学公开章节、Project Gutenberg 中文、多语言目录及 Standard Ebooks。选择来源后输入书名或作者，按 Enter 搜索；搜索结果可加入在线书架。
+顶部搜索下拉框提供酷我小说、零零小说、爱下书吧、下书看等网文来源，以及经致文学公开章节、Project Gutenberg 和 Standard Ebooks。选择来源后输入书名或作者，按 Enter 搜索；搜索结果可加入在线书架。
 
-“新增书源”保留 JSON 文本和 URL 导入，兼容 VSRead 配置及部分阅读（Legado）声明式 HTML 规则。支持 CSS 选择器与文本、属性提取，不执行书源 JavaScript，不处理登录、验证码或 XPath。网站可用性取决于网络及站点规则；进入页面不会自动请求书源网站。
+“新增书源”保留 JSON 文本和 URL 导入，兼容 VSRead 配置及部分阅读（Legado）声明式 HTML / JSON 规则。支持 CSS 选择器、简单 JSON 路径与网址模板，不执行书源 JavaScript，不处理登录、验证码或 XPath。网站可用性和章节完整性取决于来源；进入页面不会自动请求书源网站。
 
 配置格式、兼容范围和示例见 [书源配置](docs/BOOK_SOURCES.md)。
 

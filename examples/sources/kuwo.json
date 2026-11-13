@@ -1,0 +1,26 @@
+{
+  "bookSourceName": "酷我小说",
+  "bookSourceUrl": "https://appi.kuwo.cn",
+  "enabled": true,
+  "ruleType": "json",
+  "jsonResponse": { "successPath": "$.code", "successValue": 200 },
+  "searchUrl": "/novels/api/book/search?keyword={{key}}&pi={{page}}&ps=30",
+  "ruleSearch": {
+    "bookList": "$.data",
+    "name": "$.title",
+    "author": "$.author_name",
+    "bookUrl": "/novels/api/book/{{$.book_id}}"
+  },
+  "ruleBookInfo": {
+    "init": "$.data",
+    "name": "$.title",
+    "author": "$.author_name",
+    "tocUrl": "/novels/api/book/{{$.book_id}}/chapters?paging=0"
+  },
+  "ruleToc": {
+    "chapterList": "$.data",
+    "chapterName": "$.chapter_title",
+    "chapterUrl": "/novels/api/book/{{$.book_id}}/chapters/{{$.chapter_id}}"
+  },
+  "ruleContent": { "content": "$.data.content" }
+}

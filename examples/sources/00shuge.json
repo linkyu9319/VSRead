@@ -1,0 +1,22 @@
+{
+  "bookSourceName": "零零小说",
+  "bookSourceUrl": "https://www.00shuge.com",
+  "enabled": true,
+  "searchUrl": "/modules/article/search.php?q={{key}}",
+  "ruleSearch": {
+    "bookList": "table.grid tr:has(td)",
+    "name": "td:nth-child(1) a@text",
+    "author": "td:nth-child(3)@text",
+    "bookUrl": "td:nth-child(1) a@href"
+  },
+  "ruleBookInfo": {
+    "name": "meta[property=\"og:novel:book_name\"]@content",
+    "author": "meta[property=\"og:novel:author\"]@content"
+  },
+  "ruleToc": {
+    "chapterList": "#list dd a",
+    "chapterName": "@text",
+    "chapterUrl": "@href"
+  },
+  "ruleContent": { "content": "#content@html" }
+}

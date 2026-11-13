@@ -1,0 +1,22 @@
+{
+  "bookSourceName": "下书看",
+  "bookSourceUrl": "http://www.xiashukan.com/",
+  "enabled": true,
+  "searchUrl": "/s.php?keyword={{key}}",
+  "ruleSearch": {
+    "bookList": ".bookbox",
+    "name": "h4 a@text",
+    "author": ".author@text",
+    "bookUrl": "h4 a@href"
+  },
+  "ruleBookInfo": {
+    "name": "meta[property=\"og:novel:book_name\"]@content",
+    "author": "meta[property=\"og:novel:author\"]@content"
+  },
+  "ruleToc": {
+    "chapterList": ".listmain dl > dt:nth-of-type(2) ~ dd:has(a[href^=\"/html/\"])",
+    "chapterName": "a@text",
+    "chapterUrl": "a@href"
+  },
+  "ruleContent": { "content": "#content@html" }
+}

@@ -14,7 +14,11 @@ test('内置目录可直接选择，添加不联网、重复添加去重、保�
     const library = new OnlineLibrary(root, { fetchText: async () => { requests++; throw new Error('不应联网'); } });
     await library.load();
     const builtins = library.listBuiltinSources();
-    assert.equal(builtins.length, 4);
+    const catalogSize = listBuiltinSources().length;
+    assert.equal(builtins.length, catalogSize);
+    for (const id of ['kuwo', '00shuge', 'aixiashu', 'xiashukan', 'jingzhi-public', 'gutenberg-zh', 'gutenberg', 'standard-ebooks']) {
+      assert(builtins.some(item => item.id === id), id);
+    }
     assert(builtins.some(item => item.id === 'jingzhi-public' && item.language === '中文'));
     assert.equal(library.listSources().length, 0);
     for (const builtin of builtins) {
@@ -22,7 +26,7 @@ test('内置目录可直接选择，添加不联网、重复添加去重、保�
       await library.addBuiltinSource(builtin.id);
       await library.addBuiltinSource(builtin.id);
     }
-    assert.equal(library.listSources().length, 4);
+    assert.equal(library.listSources().length, catalogSize);
     assert.equal(requests, 0);
     const chinese = builtins.find(item => item.id === 'jingzhi-public')!;
     await library.toggleSource(chinese.sourceId, false);
@@ -30,10 +34,10 @@ test('内置目录可直接选择，添加不联网、重复添加去重、保�
     assert.equal(library.listSources().find(source => source.id === chinese.sourceId)?.enabled, true);
     const custom = getBuiltinSource('gutenberg');
     await library.importSources({ json: JSON.stringify({ ...custom, name: '我的自定义公版目录' }) });
-    assert.equal(library.listSources().length, 5);
+    assert.equal(library.listSources().length, catalogSize + 1);
     await assert.rejects(library.addBuiltinSource('unknown'), /不存在/);
     const restored = new OnlineLibrary(root); await restored.load();
-    assert.equal(restored.listSources().length, 5);
+    assert.equal(restored.listSources().length, catalogSize + 1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -44,6 +48,49 @@ test('所有内置规则可完成搜索、目录和正文流程，经致仅列�
     const fetchText: TextFetcher = async url => {
       requests++;
       const parsed = new URL(url);
+      if (builtin.id === 'kuwo') {
+        if (parsed.pathname === '/novels/api/book/search') {
+          assert.equal(parsed.searchParams.get('keyword'), '三国');
+          assert.equal(parsed.searchParams.get('pi'), '1');
+          return { url, text: JSON.stringify({ code: 200, data: [{ book_id: 1, title: '三国故事', author_name: '作者甲' }] }) };
+        }
+        if (parsed.pathname === '/novels/api/book/1') return { url, text: JSON.stringify({ code: 200, data: { book_id: 1, title: '三国故事', author_name: '作者甲' } }) };
+        if (parsed.pathname === '/novels/api/book/1/chapters') {
+          assert.equal(parsed.searchParams.get('paging'), '0');
+          return { url, text: JSON.stringify({ code: 200, data: [{ book_id: 1, chapter_id: 11, chapter_title: '公开第一章' }] }) };
+        }
+        if (parsed.pathname === '/novels/api/book/1/chapters/11') return { url, text: JSON.stringify({ code: 200, data: { content: '公开正文。\n第二段。' } }) };
+        throw new Error(`酷我请求了未知接口：${parsed.pathname}`);
+      }
+      if (builtin.id === '00shuge') {
+        if (parsed.pathname === '/modules/article/search.php') {
+          assert.equal(parsed.searchParams.get('q'), '三国');
+          return { url, text: '<table class="grid"><tr><th>书名</th><th>最新章节</th><th>作者</th></tr><tr><td><a href="/book/1/">三国故事</a></td><td>第一章</td><td>作者甲</td></tr></table>' };
+        }
+        if (parsed.pathname === '/book/1/') return { url, text: '<meta property="og:novel:book_name" content="三国故事"><meta property="og:novel:author" content="作者甲"><div id="list"><dl><dd><a href="/book/1/11.html">公开第一章</a></dd></dl></div>' };
+        if (parsed.pathname === '/book/1/11.html') return { url, text: '<div id="content"><p>公开正文。</p><p>第二段。</p></div>' };
+        throw new Error(`零零小说请求了未知页面：${parsed.pathname}`);
+      }
+      if (builtin.id === 'aixiashu') {
+        if (parsed.pathname === '/modules/article/search.php') {
+          assert.equal(parsed.searchParams.get('searchkey'), '三国');
+          return { url, text: '<table class="grid"><tr><th>书名</th><th>最新章节</th><th>作者</th></tr><tr><td class="even"><a href="/0/1/">三国故事</a></td><td class="odd">第一章</td><td class="even">作者甲</td></tr></table>' };
+        }
+        // 最新章节在正文目录之前；不能把最新章节误当成第一章。
+        if (parsed.pathname === '/0/1/') return { url, text: '<meta property="og:novel:book_name" content="三国故事"><meta property="og:novel:author" content="作者甲"><div id="list"><dl><dt>最新章节</dt><dd><a href="/0/1/latest.html">最新章节</a></dd><dt>正文</dt><dd><a href="/0/1/11.html">公开第一章</a></dd></dl></div>' };
+        if (parsed.pathname === '/0/1/11.html') return { url, text: '<div id="content"><p>公开正文。</p><p>第二段。</p></div>' };
+        throw new Error(`爱下书吧请求了最新分组或未知页面：${parsed.pathname}`);
+      }
+      if (builtin.id === 'xiashukan') {
+        if (parsed.pathname === '/s.php') {
+          assert.equal(parsed.searchParams.get('keyword'), '三国');
+          return { url, text: '<div class="bookbox"><h4><a href="/book/1/">三国故事</a></h4><div class="author">作者甲</div></div>' };
+        }
+        // 正文之后还有推荐书单，需要同时排除前方最新章节和后方推荐链接。
+        if (parsed.pathname === '/book/1/') return { url, text: '<meta property="og:novel:book_name" content="三国故事"><meta property="og:novel:author" content="作者甲"><div class="listmain"><dl><dt>最新章节</dt><dd><a href="/html/1/latest.html">最新章节</a></dd><dt>正文卷</dt><dd><a href="/html/1/11.html">公开第一章</a></dd><dt>邻居小说</dt><dd><a href="/book/2/">推荐小说</a></dd></dl></div>' };
+        if (parsed.pathname === '/html/1/11.html') return { url, text: '<div id="content"><p>公开正文。</p><p>第二段。</p></div>' };
+        throw new Error(`下书看请求了最新分组、推荐书籍或未知页面：${parsed.pathname}`);
+      }
       if (builtin.id === 'jingzhi-public') {
         if (parsed.pathname === '/') {
           assert.equal(parsed.searchParams.get('keyword'), '三国');
@@ -59,6 +106,7 @@ test('所有内置规则可完成搜索、目录和正文流程，经致仅列�
         if (parsed.pathname === '/ebooks/example') return { url, text: '<a href="/ebooks/example/text/single-page">Read on one page</a>' };
         return { url, text: '<body><p>公开正文。</p><p>第二段。</p></body>' };
       }
+      if (builtin.id !== 'gutenberg' && builtin.id !== 'gutenberg-zh') throw new Error(`缺少内置源测试样例：${builtin.id}`);
       if (parsed.pathname === '/ebooks/search/') {
         if (builtin.id === 'gutenberg-zh') assert.equal(parsed.searchParams.get('languages[]'), 'zh');
         return { url, text: '<ul><li class="booklink"><a class="link" href="/ebooks/1"><span class="title">論語</span><span class="subtitle">孔子</span></a></li></ul>' };

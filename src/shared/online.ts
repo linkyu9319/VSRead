@@ -3,8 +3,10 @@ export interface SourceRules {
 }
 export interface BookSource {
   id: string; name: string; baseUrl: string; enabled: boolean;
+  ruleType?: 'html' | 'json';
+  jsonResponse?: { successPath: string; successValue: string | number | boolean };
   searchUrl: string; search: SourceRules;
-  bookInfo?: { name?: string; author?: string; tocUrl?: string };
+  bookInfo?: { init?: string; name?: string; author?: string; tocUrl?: string };
   toc: { chapterList: string; chapterName: string; chapterUrl: string };
   content: { content: string };
 }

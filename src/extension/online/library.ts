@@ -3,8 +3,9 @@ import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promis
 import type { BookSource, BuiltinSourceSummary, OnlineBookRecord, OnlineChapter, OnlineChapterContent, OnlineSearchResult, SourceImportResult } from '../../shared/online';
 import { boundedNumber, isRecord } from '../../shared/validation';
 import { requestText, type TextFetcher } from './network';
-import { extract, loadHtml, normalizeSource, resolveSourceUrl, select, stableId } from './rules';
+import { normalizeSource, resolveSourceUrl, stableId } from './rules';
 import { getBuiltinSource, listBuiltinSources } from './builtins';
+import { sourceDocument } from './document';
 
 interface StoredBook extends OnlineBookRecord { cacheSizes: Record<string, number> }
 interface State { version: 1; sources: BookSource[]; books: StoredBook[] }
@@ -98,21 +99,20 @@ export class OnlineLibrary {
     if (!Number.isSafeInteger(page) || page < 1 || page > 100) throw new Error('搜索页码无效');
     const target = source.searchUrl.replace(/\{\{\s*key\s*\}\}/g, encodeURIComponent(query.trim())).replace(/\{\{\s*page\s*\}\}/g, String(page));
     const response = await this.request(resolveSourceUrl(source, target));
-    const $ = loadHtml(response.text);
+    const document = sourceDocument(source, response.text);
     const results: OnlineSearchResult[] = [];
     const seen = new Set<string>();
-    select($, source.search.bookList).slice(0, 100).each((_index, element) => {
-      const item = $(element);
-      const title = extract($, item, source.search.name).slice(0, 300);
-      const href = extract($, item, source.search.bookUrl);
-      if (!title || !href) return;
+    for (const item of document.rows(source.search.bookList).slice(0, 100)) {
+      const title = item.read(source.search.name).slice(0, 300);
+      const href = item.read(source.search.bookUrl, 'url');
+      if (!title || !href) continue;
       try {
         const url = resolveSourceUrl(source, href, response.url);
-        if (seen.has(url)) return;
+        if (seen.has(url)) continue;
         seen.add(url);
-        results.push({ sourceId, title, author: extract($, item, source.search.author).slice(0, 300) || undefined, url });
+        results.push({ sourceId, title, author: item.read(source.search.author).slice(0, 300) || undefined, url });
       } catch { /* 外部推荐或广告链接不作为书籍结果。 */ }
-    });
+    }
     return results;
   }
   async add(result: OnlineSearchResult): Promise<OnlineBookRecord> {
@@ -258,31 +258,29 @@ export class OnlineLibrary {
   private syncCached(book: StoredBook): void { book.cachedChapters = book.chapters.flatMap((chapter, index) => book.cacheSizes[chapter.id] === undefined ? [] : [index]); }
   private async refreshToc(book: StoredBook, source: BookSource): Promise<void> {
     const response = await this.request(resolveSourceUrl(source, book.url));
-    let $ = loadHtml(response.text);
-    const title = extract($, $.root(), source.bookInfo?.name);
-    const author = extract($, $.root(), source.bookInfo?.author);
-    const tocHref = extract($, $.root(), source.bookInfo?.tocUrl);
+    let document = sourceDocument(source, response.text);
+    const info = document.scope(source.bookInfo?.init);
+    const title = info.read(source.bookInfo?.name);
+    const author = info.read(source.bookInfo?.author);
+    const tocHref = info.read(source.bookInfo?.tocUrl, 'url');
     let base = response.url;
     if (tocHref) {
       const target = resolveSourceUrl(source, tocHref, base);
-      if (target !== base) { const tocPage = await this.request(target); $ = loadHtml(tocPage.text); base = tocPage.url; }
+      if (target !== base) { const tocPage = await this.request(target); document = sourceDocument(source, tocPage.text); base = tocPage.url; }
     }
     const chapters: OnlineChapter[] = [];
     const seen = new Set<string>();
-    const selected = select($, source.toc.chapterList);
-    if (selected.length > 20_000) throw new Error('目录超过 20,000 章，已停止解析');
-    selected.each((_index, node) => {
-      const item = $(node);
-      const title = extract($, item, source.toc.chapterName).slice(0, 300);
-      const href = extract($, item, source.toc.chapterUrl);
-      if (!title || !href) return;
+    for (const item of document.rows(source.toc.chapterList)) {
+      const title = item.read(source.toc.chapterName).slice(0, 300);
+      const href = item.read(source.toc.chapterUrl, 'url');
+      if (!title || !href) continue;
       try {
         const url = resolveSourceUrl(source, href, base);
-        if (seen.has(url)) return;
+        if (seen.has(url)) continue;
         seen.add(url);
         chapters.push({ id: stableId(url), title, url });
       } catch { /* 外部导航不属于当前书源目录。 */ }
-    });
+    }
     if (!chapters.length) throw new Error('没有解析到章节，请检查目录规则或站点是否需要登录/脚本');
     const oldChapter = book.progress && book.chapters[book.progress.chapter]?.id;
     if (oldChapter && book.progress) {
@@ -297,8 +295,7 @@ export class OnlineLibrary {
   private async fetchChapter(book: StoredBook, chapter: OnlineChapter): Promise<OnlineChapterContent> {
     const source = this.source(book.sourceId, true);
     const response = await this.request(resolveSourceUrl(source, chapter.url));
-    const $ = loadHtml(response.text);
-    const text = extract($, $.root(), source.content.content, true);
+    const text = sourceDocument(source, response.text).read(source.content.content, 'content');
     if (!text) throw new Error('正文为空，请检查正文规则或该章节是否需要登录/脚本');
     // 不同书籍也共享缓存预算；把检查和提交串行化，避免并发下载同时越过体积上限。
     const operation = this.cacheWrites.then(async () => {

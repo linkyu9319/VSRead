@@ -4,6 +4,7 @@ import type { AnyNode } from 'domhandler';
 import type { BookSource } from '../../shared/online';
 import { isRecord } from '../../shared/validation';
 import { validateHttpUrl } from './network';
+import { validateJsonRule } from './jsonRules';
 
 export const stableId = (value: string): string => createHash('sha256').update(value).digest('hex');
 const string = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
@@ -35,14 +36,6 @@ export function parseRule(rule: string): { selector: string; attribute: string }
   return { selector, attribute };
 }
 
-function rule(value: unknown, name: string, optional = false): string | undefined {
-  const text = string(value);
-  if (!text && optional) return undefined;
-  required(text, name);
-  parseRule(text);
-  return text;
-}
-
 /** 独立实现 Legado 字段映射，不加载上游脚本引擎或执行书源内代码。 */
 export function normalizeSource(input: unknown): BookSource {
   if (!isRecord(input)) throw new Error('书源必须是 JSON 对象');
@@ -62,21 +55,42 @@ export function normalizeSource(input: unknown): BookSource {
   const bookInfo = record(native ? input.bookInfo : input.ruleBookInfo);
   const toc = record(native ? input.toc : input.ruleToc);
   const content = record(native ? input.content : input.ruleContent);
+  if (input.ruleType !== undefined && input.ruleType !== 'html' && input.ruleType !== 'json') throw new Error('不支持的书源规则类型');
+  const json = input.ruleType === 'json' || (input.ruleType === undefined && string(search.bookList).startsWith('$'));
+  let jsonResponse: BookSource['jsonResponse'];
+  if (input.jsonResponse !== undefined) {
+    const check = record(input.jsonResponse);
+    if (!json || !['string', 'number', 'boolean'].includes(typeof check.successValue) || (typeof check.successValue === 'number' && !Number.isFinite(check.successValue))) throw new Error('JSON 成功状态配置无效');
+    const successPath = required(check.successPath, 'JSON 成功状态路径');
+    validateJsonRule(successPath);
+    jsonResponse = { successPath, successValue: check.successValue as string | number | boolean };
+  }
+  const rule = (value: unknown, name: string, optional = false, url = false): string | undefined => {
+    const text = string(value);
+    if (!text && optional) return undefined;
+    required(text, name);
+    if (json) validateJsonRule(text, url);
+    else parseRule(text);
+    return text;
+  };
   for (const [name, value] of Object.entries({ nextTocUrl: toc.nextTocUrl, nextContentUrl: content.nextContentUrl, contentReplace: content.replaceRegex })) {
     if (value) throw new Error(`当前不支持 ${name}，不能完整读取该书源`);
   }
   const source: BookSource = {
     id: stableId(base.href + '\n' + name), name, baseUrl: base.href,
     enabled: input.enabled !== false,
+    ...(json ? { ruleType: 'json' as const } : {}),
+    ...(jsonResponse ? { jsonResponse } : {}),
     searchUrl,
     search: {
       bookList: rule(search.bookList, '搜索列表')!, name: rule(search.name, '搜索书名')!,
-      bookUrl: rule(search.bookUrl, '书籍地址')!, author: rule(search.author, '搜索作者', true),
+      bookUrl: rule(search.bookUrl, '书籍地址', false, true)!, author: rule(search.author, '搜索作者', true),
     },
     bookInfo: {
-      name: rule(bookInfo.name, '详情书名', true), author: rule(bookInfo.author, '详情作者', true), tocUrl: rule(bookInfo.tocUrl, '目录地址', true),
+      ...(json ? { init: rule(bookInfo.init, '详情根节点', true) } : {}),
+      name: rule(bookInfo.name, '详情书名', true), author: rule(bookInfo.author, '详情作者', true), tocUrl: rule(bookInfo.tocUrl, '目录地址', true, true),
     },
-    toc: { chapterList: rule(toc.chapterList, '章节列表')!, chapterName: rule(toc.chapterName, '章节名称')!, chapterUrl: rule(toc.chapterUrl, '章节地址')! },
+    toc: { chapterList: rule(toc.chapterList, '章节列表')!, chapterName: rule(toc.chapterName, '章节名称')!, chapterUrl: rule(toc.chapterUrl, '章节地址', false, true)! },
     content: { content: rule(content.content, '正文规则')! },
   };
   return source;
@@ -84,7 +98,8 @@ export function normalizeSource(input: unknown): BookSource {
 
 export function loadHtml(html: string): CheerioAPI {
   const $ = load(html);
-  $('script,style,noscript,iframe,object,embed,form').remove();
+  // 仅解析 HTML；保留表单容器中的书籍结果，不会向 Webview 渲染或提交表单。
+  $('script,style,noscript,iframe,object,embed').remove();
   return $;
 }
 export function select($: CheerioAPI, selector: string): Cheerio<AnyNode> {
@@ -99,7 +114,7 @@ export function extract($: CheerioAPI, context: Cheerio<AnyNode>, rule: string |
   if (attribute !== 'text' && attribute !== 'html' && attribute !== 'textNodes') return selected.attr(attribute) ?? '';
   if (!content && attribute !== 'html') return selected.text().replace(/\s+/g, ' ').trim();
   const clone = selected.clone();
-  clone.find('script,style,noscript,iframe,object,embed,form,nav,header,footer').remove();
+  clone.find('script,style,noscript,iframe,object,embed,input,button,textarea,select,nav,header,footer').remove();
   clone.find('br').replaceWith('\n');
   clone.find('p,div,li,section,article,h1,h2,h3,blockquote').each((_index, node) => { $(node).append('\n'); });
   return clone.text().replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
