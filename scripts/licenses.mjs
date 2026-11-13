@@ -45,6 +45,10 @@ async function collect(name, from, optional = false) {
     filename: 'Node.js v7.0.0 path implementation license (upstream provenance in README.md)',
     text: await readFile(path.join(root, 'media', 'licenses', 'upstream', 'path-webpack-node-LICENSE.txt'), 'utf8'),
   });
+  if (!texts.length && name === 'boolbase') texts.push({
+    filename: 'upstream LICENSE (https://github.com/fb55/boolbase/blob/master/LICENSE)',
+    text: await readFile(path.join(root, 'media', 'licenses', 'upstream', 'boolbase-LICENSE.txt'), 'utf8'),
+  });
   // PDF 运行时资源有各自的原始许可，不能只附 JavaScript 库的 Apache 文本。
   if (name === 'pdfjs-dist') {
     for (const resource of ['cmaps', 'standard_fonts', 'wasm', 'iccs']) {

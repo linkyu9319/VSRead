@@ -5,32 +5,89 @@
   "version": "0.1.2",
   "publisher": "vsread-local",
   "private": true,
-  "repository": { "type": "git", "url": "https://github.com/linkyu9319/VSRead.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/linkyu9319/VSRead.git"
+  },
   "homepage": "https://github.com/linkyu9319/VSRead#readme",
-  "bugs": { "url": "https://github.com/linkyu9319/VSRead/issues" },
+  "bugs": {
+    "url": "https://github.com/linkyu9319/VSRead/issues"
+  },
   "license": "MIT",
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Other"],
-  "keywords": ["epub", "pdf", "txt", "reader", "offline"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "epub",
+    "pdf",
+    "txt",
+    "reader",
+    "offline"
+  ],
   "main": "./dist/extension.cjs",
-  "extensionKind": ["ui"],
-  "activationEvents": ["onWebviewPanel:vsread.reader"],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onWebviewPanel:vsread.reader"
+  ],
   "contributes": {
     "viewsContainers": {
-      "activitybar": [{ "id": "vsread", "title": "VSRead", "icon": "media/activity-book.svg" }]
+      "activitybar": [
+        {
+          "id": "vsread",
+          "title": "VSRead",
+          "icon": "media/activity-book.svg"
+        }
+      ]
     },
     "views": {
-      "vsread": [{ "id": "vsread.launcher", "name": "阅读入口", "icon": "media/activity-book.svg" }]
+      "vsread": [
+        {
+          "id": "vsread.launcher",
+          "name": "阅读入口",
+          "icon": "media/activity-book.svg"
+        }
+      ]
     },
     "commands": [
-      { "command": "vsread.open", "title": "VSRead: 打开阅读器", "icon": "$(book)" },
-      { "command": "vsread.import", "title": "VSRead: 导入本地电子书", "icon": "$(add)" }
+      {
+        "command": "vsread.open",
+        "title": "VSRead: 打开阅读器",
+        "icon": "$(book)"
+      },
+      {
+        "command": "vsread.import",
+        "title": "VSRead: 导入本地电子书",
+        "icon": "$(add)"
+      },
+      { "command": "vsread.sources", "title": "VSRead: 在线书源", "icon": "$(globe)" },
+      { "command": "vsread.checkUpdates", "title": "VSRead: 检查更新", "icon": "$(versions)" },
+      { "command": "vsread.configureUpdateToken", "title": "VSRead: 配置更新访问令牌" },
+      { "command": "vsread.clearUpdateToken", "title": "VSRead: 清除更新访问令牌" }
     ],
     "menus": {
-      "explorer/context": [{ "command": "vsread.import", "when": "resourceExtname =~ /\\.(txt|epub|pdf)$/i", "group": "navigation@90" }],
+      "explorer/context": [
+        {
+          "command": "vsread.import",
+          "when": "resourceExtname =~ /\\.(txt|epub|pdf)$/i",
+          "group": "navigation@90"
+        }
+      ],
       "view/title": [
-        { "command": "vsread.open", "when": "view == vsread.launcher", "group": "navigation@1" },
-        { "command": "vsread.import", "when": "view == vsread.launcher", "group": "navigation@2" }
+        {
+          "command": "vsread.open",
+          "when": "view == vsread.launcher",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vsread.import",
+          "when": "view == vsread.launcher",
+          "group": "navigation@2"
+        }
       ]
     }
   },
@@ -45,13 +102,16 @@
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {
+    "cheerio": "1.0.0",
     "epubjs": "0.3.93",
     "iconv-lite": "^0.7.0",
     "pdfjs-dist": "6.5.438",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
-  "overrides": { "@xmldom/xmldom": "0.9.12" },
+  "overrides": {
+    "@xmldom/xmldom": "0.9.12"
+  },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
     "@types/node": "^22.0.0",

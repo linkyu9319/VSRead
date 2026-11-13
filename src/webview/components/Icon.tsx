@@ -9,6 +9,8 @@ const paths = {
   search: 'M15 15 21 21M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z',
   trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5m4-5v5',
   check: 'm5 12 4 4L19 6',
+  globe: 'M21 12A9 9 0 1 1 3 12a9 9 0 0 1 18 0ZM3 12h18M12 3a18 18 0 0 1 0 18 18 18 0 0 1 0-18Z',
+  update: 'M20 7v5h-5M4 17v-5h5M5 8a7.5 7.5 0 0 1 12-3l3 7M4 12l3 7a7.5 7.5 0 0 0 12-3',
 };
 export function Icon({ name, size = 18 }: { name: keyof typeof paths; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>;

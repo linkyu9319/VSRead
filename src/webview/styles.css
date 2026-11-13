@@ -35,7 +35,7 @@ svg { flex-shrink: 0; }
 .header-title { min-width: 0; display: flex; align-items: center; gap: 12px; flex: 1; }
 .header-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-title small { color: var(--muted); font-size: 10px; white-space: nowrap; }
-.header-actions { display: flex; gap: 6px; }
+.header-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; max-width: 60%; }
 .header-action { white-space: nowrap; }
 .icon-button { width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border-radius: 4px; color: var(--muted); flex-shrink: 0; }
 .icon-button.active, .text-button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
@@ -90,6 +90,9 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; position: 
 .settings-panel select { font-size: 11px; width: 150px; }
 .settings-panel .panel-heading > .icon-button { margin: -6px -6px -6px 0; }
 .settings-panel .settings-hint { font-size: 10px; color: var(--muted); line-height: 1.8; margin: 18px 0 0; }
+.update-description, .update-status p { font-size: 12px; line-height: 1.8; }
+.update-status small { color: var(--muted); font-size: 10px; }
+.update-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
 .color-value { display: inline-flex; gap: 8px; align-items: center; }
 .color-value code { font-size: 10px; }
 .settings-panel input[type="color"] { width: 34px; height: 27px; padding: 2px; cursor: pointer; }

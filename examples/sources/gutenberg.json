@@ -1,0 +1,18 @@
+{
+  "bookSourceName": "Project Gutenberg",
+  "bookSourceUrl": "https://www.gutenberg.org",
+  "enabled": true,
+  "searchUrl": "/ebooks/search/?query={{key}}",
+  "ruleSearch": {
+    "bookList": "li.booklink",
+    "name": ".title@text",
+    "author": ".subtitle@text",
+    "bookUrl": "a.link@href"
+  },
+  "ruleToc": {
+    "chapterList": "a.read-online-button",
+    "chapterName": "@text",
+    "chapterUrl": "@href"
+  },
+  "ruleContent": { "content": "body@text" }
+}

@@ -1,3 +1,5 @@
+import type { OnlineRequests } from './online';
+
 export type BookFormat = 'txt' | 'epub' | 'pdf';
 export type TextEncoding = 'auto' | 'utf-8' | 'gb18030' | 'utf-16le' | 'utf-16be';
 export interface TocItem { id: string; label: string; children?: TocItem[] }
@@ -26,8 +28,8 @@ export interface OpenBook { book: BookRecord; textIndex?: TextIndex }
 export interface TextChunk { text: string; part: TextPart }
 export interface BinaryChunk { base64: string; total: number }
 
-export interface Requests {
-  init: { args: undefined; result: Library };
+export interface Requests extends OnlineRequests {
+  init: { args: undefined; result: Library & { initialView?: 'online' } };
   import: { args: undefined; result: Library };
   open: { args: { id: string }; result: OpenBook };
   text: { args: { id: string; part: number }; result: TextChunk };

@@ -8,6 +8,7 @@ VSRead 使用以下主要组件：
 | PDF.js (`pdfjs-dist`) | PDF 解析、Worker、页面和文字层 | Apache-2.0；部分字体、CMap、WASM 资源另附许可 |
 | React / React DOM | Webview 界面 | MIT |
 | iconv-lite | TXT 编码解码 | MIT |
+| Cheerio | 在线书源 HTML 与 CSS 规则解析 | MIT |
 
 这些组件及已安装的生产依赖、传递依赖的版本、声明许可和原始许可文本，汇总于：
 

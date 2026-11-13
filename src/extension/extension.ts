@@ -5,18 +5,28 @@ import { LibraryStore } from './store';
 import { BookLibrary } from './library';
 import { renderWebview } from './webview';
 import { registerSidebar } from './sidebar';
+import { OnlineLibrary } from './online/library';
+import { UpdateService } from './updates';
 import { isRecord, normalizeSettings, validateProgress } from '../shared/validation';
 import type { OpenBook, RpcRequest, TextEncoding } from '../shared/model';
+import type { OnlineSearchResult } from '../shared/online';
 
 let store: LibraryStore | undefined;
+let onlineStore: OnlineLibrary | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const libraryStore = new LibraryStore(context.globalStorageUri.fsPath);
   await libraryStore.load();
   store = libraryStore;
   const library = new BookLibrary(libraryStore, path.join(context.extensionPath, 'dist', 'txtWorker.cjs'));
+  const online = new OnlineLibrary(path.join(context.globalStorageUri.fsPath, 'online'));
+  let onlineError: string | undefined;
+  try { await online.load(); onlineStore = online; }
+  catch (error) { onlineError = `在线书库暂不可用：${errorMessage(error)}`; }
+  const updates = new UpdateService(context);
   let panel: vscode.WebviewPanel | undefined;
   let importing = false;
+  let requestedView: 'online' | undefined;
 
   const openBook = async (id: unknown): Promise<OpenBook> => {
     const book = library.book(id);
@@ -65,9 +75,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const request = message as unknown as RpcRequest;
       try {
         const args = isRecord(request.args) ? request.args : {};
+        // 在线数据损坏只影响在线功能，本地文件阅读仍可正常使用。
+        if (onlineError && (request.method.startsWith('sources.') || request.method.startsWith('online.'))) throw new Error(onlineError);
         let result: unknown;
         switch (request.method) {
-          case 'init': result = libraryStore.data; break;
+          case 'init': result = { ...libraryStore.data, initialView: requestedView }; requestedView = undefined; break;
           case 'import': await importBooks(); result = libraryStore.data; break;
           case 'open': result = await openBook(args.id); break;
           case 'text': result = await library.text(library.book(args.id), args.part); break;
@@ -108,6 +120,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             result = libraryStore.data;
             break;
           }
+          case 'sources.list': result = online.listSources(); break;
+          case 'sources.import': result = await online.importSources({ json: optionalString(args.json), url: optionalString(args.url) }); break;
+          case 'sources.toggle': result = await online.toggleSource(requiredString(args.id), args.enabled === true); break;
+          case 'sources.remove': result = await online.removeSource(requiredString(args.id)); break;
+          case 'online.list': result = online.listBooks(); break;
+          case 'online.search': result = await online.search(requiredString(args.sourceId), requiredString(args.query), args.page as number); break;
+          case 'online.add': {
+            if (!isRecord(args.result)) throw new Error('书籍信息无效');
+            result = await online.add(args.result as unknown as OnlineSearchResult);
+            break;
+          }
+          case 'online.open': result = await online.open(requiredString(args.id), args.refresh === true); break;
+          case 'online.chapter': result = await online.chapter(requiredString(args.id), args.chapter as number, args.refresh === true); break;
+          case 'online.progress': await online.saveProgress(requiredString(args.id), args.chapter as number, args.scroll as number); break;
+          case 'online.cache': result = await online.cacheChapters(requiredString(args.id), args.from as number, args.count as number); break;
+          case 'online.clearCache': result = await online.clearCache(requiredString(args.id)); break;
+          case 'online.remove': result = await online.removeBook(requiredString(args.id)); break;
+          case 'updates.check': result = await updates.check(); break;
+          case 'updates.open': await updates.open(); break;
+          case 'updates.auth': {
+            if (args.action !== 'set' && args.action !== 'clear') throw new Error('令牌操作无效');
+            await updates.auth(args.action);
+            break;
+          }
           default: throw new Error('不支持的阅读器请求');
         }
         await target.webview.postMessage({ id: request.id, result });
@@ -123,7 +159,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return target;
   };
   context.subscriptions.push(
-    vscode.commands.registerCommand('vsread.open', show),
+    vscode.commands.registerCommand('vsread.open', async () => { requestedView = undefined; await show(); }),
+    vscode.commands.registerCommand('vsread.sources', async () => {
+      requestedView = 'online';
+      const target = await show();
+      await target.webview.postMessage({ event: 'navigate', view: 'online' });
+    }),
+    vscode.commands.registerCommand('vsread.checkUpdates', async () => {
+      try {
+        const status = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'VSRead · 检查更新' }, () => updates.check());
+        const action = status.state === 'available' ? await vscode.window.showInformationMessage(status.message, '查看发布页') : await vscode.window.showInformationMessage(status.message);
+        if (action === '查看发布页') await updates.open();
+      } catch (error) { void vscode.window.showErrorMessage(errorMessage(error)); }
+    }),
+    vscode.commands.registerCommand('vsread.configureUpdateToken', () => updates.auth('set')),
+    vscode.commands.registerCommand('vsread.clearUpdateToken', () => updates.auth('clear')),
     vscode.commands.registerCommand('vsread.import', async (resource?: vscode.Uri) => {
       try {
         await importBooks(resource);
@@ -137,4 +187,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-export async function deactivate(): Promise<void> { await store?.flush(); }
+function requiredString(value: unknown): string { if (typeof value !== 'string' || !value.trim()) throw new Error('请求参数无效'); return value; }
+function optionalString(value: unknown): string | undefined { if (value === undefined) return undefined; return requiredString(value); }
+export async function deactivate(): Promise<void> { await Promise.all([store?.flush(), onlineStore?.flush()]); }

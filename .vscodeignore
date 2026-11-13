@@ -6,6 +6,7 @@
 !CHANGELOG.md
 !media/**
 !docs/**
+!examples/**
 !dist/extension.cjs
 !dist/txtWorker.cjs
 !dist/webview/**

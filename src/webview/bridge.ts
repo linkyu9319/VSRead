@@ -21,9 +21,18 @@ export function request<K extends keyof Requests>(method: K, args: Requests[K]['
   if (!api) return Promise.reject(new Error('请在 CodeBuddy 或 VS Code 中打开 VSRead。'));
   const id = `vsread-${++sequence}`;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error('操作超时，请重新打开阅读器后重试')); }, method === 'import' ? 600_000 : 120_000);
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error('操作超时，请重新打开阅读器后重试')); }, method === 'import' || method === 'online.cache' ? 600_000 : 120_000);
     pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
     api.postMessage({ id, method, args });
   });
 }
-export function rememberBook(id?: string): void { api?.setState({ bookId: id }); }
+interface SavedView { view: 'shelf' | 'online'; bookId?: string; onlineBookId?: string }
+export function savedView(): SavedView {
+  const value = api?.getState();
+  if (!value || typeof value !== 'object') return { view: 'shelf' };
+  const state = value as Record<string, unknown>;
+  const id = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
+  return { view: state.view === 'online' ? 'online' : 'shelf', bookId: id(state.bookId), onlineBookId: id(state.onlineBookId) };
+}
+export function rememberBook(id?: string): void { api?.setState({ view: 'shelf', bookId: id }); }
+export function rememberOnline(id?: string): void { api?.setState({ view: 'online', onlineBookId: id }); }
