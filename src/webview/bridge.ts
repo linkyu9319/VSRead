@@ -21,7 +21,7 @@ export function request<K extends keyof Requests>(method: K, args: Requests[K]['
   if (!api) return Promise.reject(new Error('请在 CodeBuddy 或 VS Code 中打开 VSRead。'));
   const id = `vsread-${++sequence}`;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error('操作超时，请重新打开阅读器后重试')); }, method === 'import' || method === 'online.cache' ? 600_000 : 120_000);
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error('操作超时，请重新打开阅读器后重试')); }, method === 'import' || method === 'online.cache' || method === 'updates.install' ? 600_000 : 120_000);
     pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
     api.postMessage({ id, method, args });
   });

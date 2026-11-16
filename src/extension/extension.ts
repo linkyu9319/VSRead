@@ -104,7 +104,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!isRecord(message) || typeof message.id !== 'string' || message.id.length > 100 || typeof message.method !== 'string') return;
       const request = message as unknown as RpcRequest;
       const started = Date.now();
-      const traced = /^(online\.(search|add|open|chapter|cache|cacheAll\.(start|cancel))|sources\.(import|builtin\.add))$/.test(request.method);
+      const traced = /^(online\.(search|add|open|chapter|cache|cacheAll\.(start|cancel))|sources\.(import|builtin\.add)|updates\.(install|reload))$/.test(request.method);
       if (traced) log.write('info', 'rpc.start', { method: request.method, requestId: request.id });
       try {
         const args = isRecord(request.args) ? request.args : {};
@@ -184,6 +184,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           case 'online.clearCache': result = await online.clearCache(requiredString(args.id)); break;
           case 'online.remove': result = await online.removeBook(requiredString(args.id)); break;
           case 'updates.check': result = await updates.check(); break;
+          case 'updates.install': result = await updates.install(); break;
+          case 'updates.reload': await Promise.all([store?.flush(), onlineStore?.flush(), log.flush()]); await updates.reload(); break;
           case 'updates.open': await updates.open(); break;
           case 'updates.auth': {
             if (args.action !== 'set' && args.action !== 'clear') throw new Error('令牌操作无效');
@@ -222,8 +224,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('vsread.checkUpdates', async () => {
       try {
         const status = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'VSRead · 检查更新' }, () => updates.check());
-        const action = status.state === 'available' ? await vscode.window.showInformationMessage(status.message, '查看发布页') : await vscode.window.showInformationMessage(status.message);
-        if (action === '查看发布页') await updates.open();
+        const action = status.state === 'available' ? await vscode.window.showInformationMessage(status.message, '一键更新', '查看发布页') : await vscode.window.showInformationMessage(status.message);
+        if (action === '一键更新') {
+          const installed = await updates.install();
+          const next = installed.state === 'installed' ? await vscode.window.showInformationMessage(installed.message, '重载窗口') : await vscode.window.showInformationMessage(installed.message);
+          if (next === '重载窗口') { await Promise.all([store?.flush(), onlineStore?.flush(), log.flush()]); await updates.reload(); }
+        } else if (action === '查看发布页') await updates.open();
       } catch (error) { void vscode.window.showErrorMessage(errorMessage(error)); }
     }),
     vscode.commands.registerCommand('vsread.configureUpdateToken', () => updates.auth('set')),

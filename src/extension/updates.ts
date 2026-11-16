@@ -1,6 +1,8 @@
 import * as https from 'node:https';
 import type * as vscode from 'vscode';
-import type { UpdateStatus } from '../shared/online';
+import path from 'node:path';
+import type { UpdateInstallResult, UpdateStatus } from '../shared/online';
+import { installUpdate, selectUpdateAsset } from './updateInstaller';
 
 export const RELEASES_URL = 'https://github.com/linkyu9319/VSRead/releases';
 export const LATEST_RELEASE_API = 'https://api.github.com/repos/linkyu9319/VSRead/releases/latest';
@@ -13,6 +15,10 @@ export interface UpdateServiceOptions {
   request?: (token: string | undefined) => Promise<ReleaseResponse>;
   inputToken?: () => Promise<string | undefined>;
   openExternal?: (url: string) => Promise<boolean>;
+  install?: typeof installUpdate;
+  withProgress?: (task: (signal: AbortSignal, report: (received: number, total: number) => void) => Promise<UpdateInstallResult>) => Promise<UpdateInstallResult>;
+  installFile?: (file: string) => Promise<void>;
+  reloadWindow?: () => Promise<void>;
 }
 
 function parseVersion(value: string): Version | undefined {
@@ -107,6 +113,8 @@ export async function requestLatestRelease(token?: string): Promise<ReleaseRespo
 
 export class UpdateService {
   private pending?: Promise<UpdateStatus>;
+  private installing?: Promise<UpdateInstallResult>;
+  private installed?: UpdateInstallResult;
   private currentVersion: string;
   constructor(private context: vscode.ExtensionContext, private options: UpdateServiceOptions = {}) {
     this.currentVersion = String(context.extension.packageJSON.version);
@@ -125,6 +133,63 @@ export class UpdateService {
     } catch {
       // 网络和凭据错误只返回固定提示，不把可能包含请求信息的异常暴露给 Webview。
       return unavailable(this.currentVersion, '无法连接 GitHub，请检查网络连接后重试。');
+    }
+  }
+
+  /** 用户点击后重新确认最新正式版本；同一 Host 的并发请求只启动一次安装。 */
+  install(): Promise<UpdateInstallResult> {
+    if (this.installed) return Promise.resolve(this.installed);
+    if (!this.installing) this.installing = this.installOnce().then(result => {
+      if (result.state === 'installed') this.installed = result;
+      return result;
+    }).finally(() => { this.installing = undefined; });
+    return this.installing;
+  }
+
+  private async installOnce(): Promise<UpdateInstallResult> {
+    const run = this.options.withProgress ?? (async task => {
+      const vscode = await import('vscode');
+      return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'VSRead · 更新插件', cancellable: true }, async (progress, cancellation) => {
+        const controller = new AbortController();
+        const subscription = cancellation.onCancellationRequested(() => controller.abort());
+        if (cancellation.isCancellationRequested) controller.abort();
+        let percentage = 0;
+        progress.report({ message: '获取最新版本…' });
+        try {
+          return await task(controller.signal, (received, total) => {
+            const next = Math.min(100, received / total * 100);
+            progress.report({ increment: Math.max(0, next - percentage), message: next < 100 ? `下载中 ${next.toFixed(0)}%` : '正在校验并安装，请稍候…' });
+            percentage = next;
+          });
+        } finally { subscription.dispose(); }
+      });
+    });
+    return run(async (signal, report) => {
+      let response: ReleaseResponse;
+      const token = await this.context.secrets.get(TOKEN_KEY);
+      try { response = await (this.options.request ?? requestLatestRelease)(token); }
+      catch { if (signal.aborted) return { state: 'cancelled', message: '已取消更新，当前版本保持不变。' }; throw new Error('无法连接 GitHub，请稍后重试或从发布页手动安装。'); }
+      if (signal.aborted) return { state: 'cancelled', message: '已取消更新，当前版本保持不变。' };
+      const status = releaseStatus(this.currentVersion, response, Boolean(token));
+      if (status.state !== 'available' || !status.latestVersion) throw new Error(status.message);
+      const asset = selectUpdateAsset(status.latestVersion, JSON.parse(response.body));
+      return (this.options.install ?? installUpdate)(asset, {
+        directory: path.join(this.context.globalStorageUri.fsPath, 'updates'), token, signal, onProgress: report,
+        install: this.options.installFile ?? (async file => {
+          const vscode = await import('vscode');
+          try { await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(file)); }
+          catch { throw new Error('IDE 未能完成安装，请从发布页下载并手动安装。'); }
+        }),
+      });
+    });
+  }
+
+  async reload(): Promise<void> {
+    if (!this.installed) throw new Error('请先完成更新安装。');
+    if (this.options.reloadWindow) await this.options.reloadWindow();
+    else {
+      const vscode = await import('vscode');
+      await vscode.commands.executeCommand('workbench.action.reloadWindow');
     }
   }
 

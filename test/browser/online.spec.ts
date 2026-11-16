@@ -39,6 +39,11 @@ async function mockOnlineHost(page: Page) {
       localStorage.setItem('online-fixture', JSON.stringify(state));
     };
     (window as any).__onlineRpc = [];
+    (window as any).__heldOnlineProgress = [];
+    (window as any).__finishOnlineProgress = () => {
+      (window as any).__holdOnlineProgress = false;
+      for (const pending of (window as any).__heldOnlineProgress.splice(0)) pending.resolve();
+    };
     window.acquireVsCodeApi = () => ({
       getState: () => JSON.parse(localStorage.getItem('fixture-view') ?? '{}'), setState: value => localStorage.setItem('fixture-view', JSON.stringify(value)),
       postMessage: async ({ id, method, args }: any) => {
@@ -89,7 +94,13 @@ async function mockOnlineHost(page: Page) {
               result = { chapter: book.chapters[args.chapter], text: `${book.chapters[args.chapter].title}\n` + '这是在线获取后保存在本地的纯文本正文。\n'.repeat(100), cached };
               break;
             }
-            case 'online.progress': book.progress = { chapter: args.chapter, scroll: args.scroll, updatedAt: new Date().toISOString() }; break;
+            case 'online.progress': {
+              if ((window as any).__holdOnlineProgress) await new Promise<void>(resolve => {
+                (window as any).__heldOnlineProgress.push({ args: structuredClone(args), resolve });
+              });
+              book.progress = { chapter: args.chapter, scroll: args.scroll, updatedAt: new Date().toISOString() };
+              break;
+            }
             case 'online.cache': {
               if (['running', 'cancelling'].includes(jobs[book.id]?.state)) throw new Error('请先取消全本缓存');
               let cached = 0, failed = 0;
@@ -111,6 +122,18 @@ async function mockOnlineHost(page: Page) {
             case 'online.clearCache': delete jobs[book.id]; book.cachedChapters = []; result = book; break;
             case 'online.remove': state.books = state.books.filter((item: any) => item.id !== args.id); result = state.books; break;
             case 'updates.check': result = { state: 'available', currentVersion: '0.1.2', latestVersion: '0.2.0', releaseUrl: 'https://github.com/linkyu9319/VSRead/releases/tag/v0.2.0', message: '发现新版本 0.2.0' }; break;
+            case 'updates.install': {
+              (window as any).__installAttempts = ((window as any).__installAttempts ?? 0) + 1;
+              if ((window as any).__holdInstall) await new Promise<void>(resolve => { (window as any).__finishInstall = resolve; });
+              if ((window as any).__failInstall) throw new Error('更新未完成，请稍后重试');
+              result = (window as any).__cancelInstall
+                ? { state: 'cancelled', message: '已取消更新，当前版本保持不变' }
+                : { state: 'installed', version: '0.2.0', message: '更新已安装，重载窗口后生效' };
+              break;
+            }
+            case 'updates.reload':
+              (window as any).__progressAtReload = structuredClone(state.books[0]?.progress);
+              (window as any).__reloadRequested = true; break;
             case 'updates.open': (window as any).__releaseOpened = true; break;
             case 'updates.auth': (window as any).__authAction = args.action; break;
             case 'settings': Object.assign(settings, args); break;
@@ -200,6 +223,59 @@ test('配置链接导入与版本检查入口', async ({ page }) => {
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
+test('一键更新安装期间不重复操作，关闭面板后保留结果并可重载窗口', async ({ page }) => {
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  await expect(dialog.getByRole('button', { name: '一键更新', exact: true })).toBeEnabled();
+  await page.evaluate(() => { (window as any).__holdInstall = true; });
+  await dialog.getByRole('button', { name: '一键更新', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: '正在更新…', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: '检查更新', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: '配置访问令牌', exact: true })).toBeDisabled();
+  await dialog.getByRole('button', { name: '关闭软件更新', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: '正在更新…', exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => (window as any).__onlineRpc.filter((call: any) => call.method === 'updates.check').length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__installAttempts)).toBe(1);
+  await dialog.getByRole('button', { name: '关闭软件更新', exact: true }).click();
+  await page.evaluate(() => (window as any).__finishInstall());
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
+  await expect(dialog).toContainText('更新已安装，重载窗口后生效');
+  await expect(dialog.getByRole('button', { name: '一键更新', exact: true })).toHaveCount(0);
+  await dialog.getByRole('button', { name: '重载窗口', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__reloadRequested)).toBe(true);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('一键更新失败后可重试或打开发布页，成功后才提示重载', async ({ page }) => {
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  await page.evaluate(() => { (window as any).__failInstall = true; });
+  await dialog.getByRole('button', { name: '一键更新', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('更新未完成，请稍后重试');
+  await expect(dialog.getByRole('button', { name: '重载窗口', exact: true })).toHaveCount(0);
+  await dialog.getByRole('button', { name: '查看发布页', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).__releaseOpened)).toBe(true);
+  await page.evaluate(() => { (window as any).__failInstall = false; });
+  await dialog.getByRole('button', { name: '重试更新', exact: true }).click();
+  await expect(dialog).toContainText('更新已安装，重载窗口后生效');
+  await expect(dialog.getByRole('button', { name: '重载窗口', exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).__installAttempts)).toBe(2);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('取消一键更新保留可更新状态，不误显示安装成功', async ({ page }) => {
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  await page.evaluate(() => { (window as any).__cancelInstall = true; });
+  await dialog.getByRole('button', { name: '一键更新', exact: true }).click();
+  await expect(dialog).toContainText('已取消更新，当前版本保持不变');
+  await expect(dialog.getByRole('button', { name: '重载窗口', exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: '一键更新', exact: true })).toBeEnabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
 async function openSavedOnlineBook(page: Page, chapter = 0, scroll = 0, cachedChapters = [0, 1, 2]) {
   const book = {
     id: 'f'.repeat(64), sourceId: source.id, title: '星海在线', author: '测试作者', url: 'https://fiction.example/book/one',
@@ -213,6 +289,41 @@ async function openSavedOnlineBook(page: Page, chapter = 0, scroll = 0, cachedCh
   await expect(page.locator('.online-chapter-content h3')).toHaveText(book.chapters[chapter].title);
   await expect(page.getByRole('button', { name: '刷新本章', exact: true })).toBeEnabled();
 }
+
+test('更新后重载窗口先等待在线章节最新进度保存成功', async ({ page }) => {
+  await openSavedOnlineBook(page, 1, .25);
+  await expect(page.locator('.online-reader .page-controls')).toContainText('进度已保存');
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  await dialog.getByRole('button', { name: '一键更新', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: '重载窗口', exact: true })).toBeEnabled();
+  await dialog.getByRole('button', { name: '关闭软件更新', exact: true }).click();
+
+  await page.evaluate(() => { (window as any).__holdOnlineProgress = true; });
+  const surface = page.getByTestId('online-reading-surface');
+  const expectedScroll = await surface.evaluate(element => {
+    element.scrollTop = (element.scrollHeight - element.clientHeight) * .64;
+    element.dispatchEvent(new Event('scroll'));
+    return element.scrollTop / (element.scrollHeight - element.clientHeight);
+  });
+  await expect(page.locator('.online-reader .page-controls')).toContainText('正在保存…');
+  await page.getByRole('button', { name: '检查更新', exact: true }).click();
+  await dialog.getByRole('button', { name: '重载窗口', exact: true }).click();
+  // 用宿主应答闸门控制保存完成，不依赖 400ms 防抖是否已经触发。
+  await expect.poll(() => page.evaluate(() => (window as any).__heldOnlineProgress.length)).toBeGreaterThan(0);
+  const held = await page.evaluate(() => (window as any).__heldOnlineProgress.map((pending: any) => pending.args));
+  expect(held.at(-1).chapter).toBe(1);
+  expect(held.at(-1).scroll).toBeCloseTo(expectedScroll, 5);
+  expect(await page.evaluate(() => (window as any).__reloadRequested === true)).toBe(false);
+  expect(await page.evaluate(() => (window as any).__onlineRpc.some((call: any) => call.method === 'updates.reload'))).toBe(false);
+
+  await page.evaluate(() => (window as any).__finishOnlineProgress());
+  await expect.poll(() => page.evaluate(() => (window as any).__reloadRequested)).toBe(true);
+  const savedAtReload = await page.evaluate(() => (window as any).__progressAtReload);
+  expect(savedAtReload.chapter).toBe(1);
+  expect(savedAtReload.scroll).toBeCloseTo(expectedScroll, 5);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
 
 test('在线章节上下键滚动且输入框保留按键行为', async ({ page }) => {
   await openSavedOnlineBook(page, 0, .35);

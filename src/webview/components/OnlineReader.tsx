@@ -5,6 +5,7 @@ import type { CacheAllJob, OnlineBookRecord, OnlineChapterContent } from '../../
 import { formatPercentage } from '../../shared/format';
 import { request } from '../bridge';
 import { OnlineProgressWriter, type ChapterPosition } from '../onlineProgress';
+import { registerProgressFlusher } from '../readingProgress';
 import { Icon } from './Icon';
 import { CacheAllControls } from './CacheAllControls';
 
@@ -78,6 +79,8 @@ export function OnlineReader(props: Props) {
     viewportSize.current = { width: node.clientWidth, height: node.clientHeight };
     remember({ chapter: shownChapter.current, scroll: Math.min(1, Math.max(0, node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight))) });
   }, [remember]);
+
+  useEffect(() => registerProgressFlusher(async () => { capture(); await writer.current!.flush(); }), [capture]);
 
   const loadChapter = useCallback(async (index: number, scroll = 0, refresh = false) => {
     if (!bookRef.current.chapters[index]) return;

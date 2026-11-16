@@ -36,6 +36,9 @@ export interface UpdateStatus {
   state: 'available' | 'current' | 'unavailable'; currentVersion: string;
   latestVersion?: string; releaseUrl?: string; publishedAt?: string; message: string;
 }
+export interface UpdateInstallResult {
+  state: 'installed' | 'cancelled'; version?: string; message: string;
+}
 
 export interface OnlineRequests {
   'sources.builtin.list': { args: undefined; result: BuiltinSourceSummary[] };
@@ -57,6 +60,8 @@ export interface OnlineRequests {
   'online.clearCache': { args: { id: string }; result: OnlineBookRecord };
   'online.remove': { args: { id: string }; result: OnlineBookRecord[] };
   'updates.check': { args: undefined; result: UpdateStatus };
+  'updates.install': { args: undefined; result: UpdateInstallResult };
+  'updates.reload': { args: undefined; result: void };
   'updates.open': { args: undefined; result: void };
   'updates.auth': { args: { action: 'set' | 'clear' }; result: void };
 }

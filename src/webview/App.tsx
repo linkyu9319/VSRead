@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { DEFAULT_SETTINGS, type BookRecord, type Library, type OpenBook, type Progress, type ReaderSettings, type TextEncoding } from '../shared/model';
 import { rememberBook, rememberFocus, rememberOnline, request, savedView } from './bridge';
 import { ProgressWriter } from './progressWriter';
+import { flushReadingProgress } from './readingProgress';
 import { Bookshelf } from './components/Bookshelf';
 import { ReaderView } from './components/ReaderView';
 import { Settings } from './components/Settings';
@@ -10,7 +11,7 @@ import { formatPercentage } from '../shared/format';
 import { customThemeStyle } from './theme';
 import { OnlineHub } from './components/OnlineHub';
 import { UpdatesPanel } from './components/UpdatesPanel';
-import type { UpdateStatus } from '../shared/online';
+import type { UpdateInstallResult, UpdateStatus } from '../shared/online';
 import './online.css';
 
 export function App() {
@@ -22,6 +23,13 @@ export function App() {
   const [updatesVisible, setUpdatesVisible] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>();
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [reloadingUpdate, setReloadingUpdate] = useState(false);
+  // 关闭弹层只隐藏界面，后台安装及其完成结果继续保留。
+  const [updateInstallResult, setUpdateInstallResult] = useState<UpdateInstallResult>();
+  const [updateError, setUpdateError] = useState('');
+  // 同步加锁，防止快速点击在 React 更新按钮状态前发起并行请求。
+  const updateOperation = useRef(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -146,10 +154,38 @@ export function App() {
   };
   const currentBook = source && library.books.find(book => book.id === source.book.id);
   const checkUpdates = async () => {
+    if (updateOperation.current || updateInstallResult?.state === 'installed') return;
+    updateOperation.current = true;
     setSettingsVisible(false); setUpdatesVisible(true); setCheckingUpdates(true);
+    setUpdateError(''); setUpdateInstallResult(undefined);
     try { setUpdateStatus(await request('updates.check', undefined)); }
-    catch (error) { reportError(error); }
-    finally { setCheckingUpdates(false); }
+    catch (error) { setUpdateError(error instanceof Error ? error.message : String(error)); }
+    finally { updateOperation.current = false; setCheckingUpdates(false); }
+  };
+  const showUpdates = () => {
+    setSettingsVisible(false); setUpdatesVisible(true);
+    if (!updateStatus && !updateInstallResult && !updateError) void checkUpdates();
+  };
+  const installUpdate = async () => {
+    if (updateOperation.current || updateInstallResult?.state === 'installed') return;
+    updateOperation.current = true; setInstallingUpdate(true); setUpdateError(''); setUpdateInstallResult(undefined);
+    try { setUpdateInstallResult(await request('updates.install', undefined)); }
+    catch (error) { setUpdateError(error instanceof Error ? error.message : String(error)); }
+    finally { updateOperation.current = false; setInstallingUpdate(false); }
+  };
+  const reloadUpdate = async () => {
+    if (updateOperation.current) return;
+    updateOperation.current = true; setReloadingUpdate(true); setUpdateError('');
+    try { await writer.current?.flush(); await flushReadingProgress(); await settingsQueue.current; await request('updates.reload', undefined); }
+    catch (error) { setUpdateError(error instanceof Error ? error.message : String(error)); }
+    finally { updateOperation.current = false; setReloadingUpdate(false); }
+  };
+  const updateAuth = async (action: 'set' | 'clear') => {
+    if (updateOperation.current || updateInstallResult?.state === 'installed') return;
+    updateOperation.current = true; setUpdateError('');
+    try { await request('updates.auth', { action }); setUpdateStatus(undefined); }
+    catch (error) { setUpdateError(error instanceof Error ? error.message : String(error)); }
+    finally { updateOperation.current = false; }
   };
   return <div className="app" data-theme={library.settings.theme} data-focus={focusMode ? 'true' : undefined} style={customThemeStyle(library.settings)} onPointerDownCapture={event => {
     if (settingsVisible && event.target instanceof Element && !event.target.closest('.settings-panel, [data-settings-toggle]')) setSettingsVisible(false);
@@ -157,14 +193,14 @@ export function App() {
   }}>
     <header className="app-header"><button className="brand" onClick={showShelf} aria-label="返回书架" title="VSRead · 青菜阅读"><span className="brand-mark vegetable-mark" aria-hidden="true">🥬</span>VS<span className="brand-read">Read</span><small className="brand-cn">青菜阅读</small></button><span className="header-divider" />
       <div className="header-title">{source ? <><span>{currentBook?.title ?? source.book.title}</span><small>{currentBook?.author || source.book.format.toUpperCase()}</small></> : <span className="muted">{page === 'online' ? '在线书源' : '你的阅读空间'}</span>}</div>
-      <div className="header-actions">{(source || page === 'online') && <button className="text-button header-action" onClick={showShelf} title="我的书架" aria-label="我的书架"><Icon name="shelf" /><span>我的书架</span></button>}<button className={`text-button header-action ${page === 'online' ? 'active' : ''}`} onClick={showOnline} aria-label="在线书源"><Icon name="globe" /><span>在线书源</span></button><button data-update-toggle className={`text-button header-action ${updatesVisible ? 'active' : ''}`} onClick={() => { void checkUpdates(); }} disabled={checkingUpdates} aria-label="检查更新"><Icon name="update" /><span>检查更新</span></button><button ref={settingsToggle} data-settings-toggle className={`text-button header-action ${settingsVisible ? 'active' : ''}`} onClick={() => { setUpdatesVisible(false); setSettingsVisible(!settingsVisible); }} title="调整背景、字号与行距" aria-label="阅读设置" aria-controls="reading-settings" aria-expanded={settingsVisible}><Icon name="settings" /><span>阅读设置</span></button><button className="text-button header-action" onClick={() => setFocusMode(true)} title="隐藏名称、工具栏与目录 · Ctrl+Alt+H" aria-label="专注阅读"><Icon name="focus" /><span>专注阅读</span></button></div>
+      <div className="header-actions">{(source || page === 'online') && <button className="text-button header-action" onClick={showShelf} title="我的书架" aria-label="我的书架"><Icon name="shelf" /><span>我的书架</span></button>}<button className={`text-button header-action ${page === 'online' ? 'active' : ''}`} onClick={showOnline} aria-label="在线书源"><Icon name="globe" /><span>在线书源</span></button><button data-update-toggle className={`text-button header-action ${updatesVisible ? 'active' : ''}`} onClick={showUpdates} aria-label="检查更新"><Icon name="update" /><span>检查更新</span></button><button ref={settingsToggle} data-settings-toggle className={`text-button header-action ${settingsVisible ? 'active' : ''}`} onClick={() => { setUpdatesVisible(false); setSettingsVisible(!settingsVisible); }} title="调整背景、字号与行距" aria-label="阅读设置" aria-controls="reading-settings" aria-expanded={settingsVisible}><Icon name="settings" /><span>阅读设置</span></button><button className="text-button header-action" onClick={() => setFocusMode(true)} title="隐藏名称、工具栏与目录 · Ctrl+Alt+H" aria-label="专注阅读"><Icon name="focus" /><span>专注阅读</span></button></div>
     </header>
     {focusMode && <button className="focus-restore icon-button" aria-label="退出专注阅读" title="恢复界面 · Esc / Ctrl+Alt+H" onClick={() => setFocusMode(false)}><Icon name="focus" size={16} /></button>}
     {error && <div className="error-banner" role="alert"><span>{error}</span><button className="text-button" onClick={() => { void request('diagnostics.open', undefined).catch(reportError); }}>查看日志</button><button className="icon-button" aria-label="关闭提示" onClick={() => setError('')}><Icon name="close" size={15} /></button></div>}
     <main>{initializing ? <div className="initial-loading"><span className="spinner" />正在打开书架…</div> : page === 'online' ? <OnlineHub settings={library.settings} onError={reportError} initialBookId={initialOnlineBookId} onBackToShelf={showShelf} /> : source ? <ReaderView key={source.book.id + (source.book.encoding ?? '')} source={source} settings={library.settings} onProgress={onProgress} onMetadata={onMetadata} onError={reportError} onEncoding={encoding => { if (!busy) void changeEncoding(encoding); }} /> : <Bookshelf books={library.books} busy={busy} onOpen={id => void open(id)} onOpenOnline={openOnline} onShowSources={showOnline} onError={reportError} onImport={() => void importBooks()} onRemove={id => { void writer.current!.flush().then(() => request('remove', { id })).then(setLibrary).catch(reportError); }} />}</main>
     {(settingsVisible || updatesVisible) && <div className="settings-dismiss" aria-hidden="true" />}
     {settingsVisible && <Settings value={library.settings} format={source?.book.format} onChange={updateSettings} onClose={() => { setSettingsVisible(false); settingsToggle.current?.focus(); }} />}
-    {updatesVisible && <UpdatesPanel status={updateStatus} checking={checkingUpdates} onCheck={() => { void checkUpdates(); }} onOpen={() => { void request('updates.open', undefined).catch(reportError); }} onAuth={action => { void request('updates.auth', { action }).then(() => setUpdateStatus(undefined)).catch(reportError); }} onClose={() => setUpdatesVisible(false)} />}
+    {updatesVisible && <UpdatesPanel status={updateStatus} checking={checkingUpdates} installing={installingUpdate} reloading={reloadingUpdate} installResult={updateInstallResult} error={updateError} onCheck={() => { void checkUpdates(); }} onInstall={() => { void installUpdate(); }} onReload={() => { void reloadUpdate(); }} onOpen={() => { void request('updates.open', undefined).catch(reportError); }} onAuth={action => { void updateAuth(action); }} onClose={() => setUpdatesVisible(false)} />}
     <footer className="app-status"><span><span className="status-dot" /> {page === 'online' ? 'ONLINE / LOCAL CACHE' : 'LOCAL / OFFLINE'}</span>{source ? <><span className="save-indicator"><Icon name="check" size={12} />{saveState}</span><span className="reading-percentage">{currentBook?.progress?.position.format === 'pdf' && `第 ${currentBook.progress.position.page} 页 · `}{formatPercentage(currentBook?.progress?.percentage)}</span></> : <span>留一点时间，给好故事。</span>}</footer>
   </div>;
 }

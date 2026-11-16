@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type * as vscode from 'vscode';
 import { compareVersions, releaseStatus, UpdateService, RELEASES_URL } from '../src/extension/updates';
+import type { UpdateInstallResult } from '../src/shared/online';
 
 test('版本比较遵循 SemVer 数字、预发布及构建元数据顺序', () => {
   assert.equal(compareVersions('v1.10.0', '1.9.0'), 1);
@@ -71,4 +72,56 @@ test('检查错误不暴露底层请求或令牌，取消输入不改变凭据',
   const status = await updates.check();
   assert.equal(status.state, 'unavailable');
   assert(!JSON.stringify(status).includes('secret-value'));
+});
+
+const installContext = () => ({
+  extension: { packageJSON: { version: '0.1.8' } },
+  globalStorageUri: { fsPath: 'C:/vsread-test-storage' },
+  secrets: { get: async () => 'private-test-token' },
+}) as unknown as vscode.ExtensionContext;
+const installRelease = (version = '0.2.0') => ({ status: 200, body: JSON.stringify({
+  tag_name: `v${version}`, assets: [{ id: 1, name: `vsread-${version}.vsix`, size: 400, state: 'uploaded', digest: `sha256:${'a'.repeat(64)}` }],
+}) });
+const progress: NonNullable<ConstructorParameters<typeof UpdateService>[1]>['withProgress'] = task => task(new AbortController().signal, () => {});
+
+test('安装服务重新确认正式版本，合并并发安装，成功后重载且不重复下载安装', async () => {
+  let requests = 0, installs = 0, reloads = 0;
+  let releaseInstall!: (result: UpdateInstallResult) => void;
+  const done = new Promise<UpdateInstallResult>(resolve => { releaseInstall = resolve; });
+  const updates = new UpdateService(installContext(), {
+    request: async token => { requests++; assert.equal(token, 'private-test-token'); return installRelease(); },
+    withProgress: progress,
+    install: async (asset, options) => {
+      installs++; assert.equal(asset.version, '0.2.0'); assert.equal(options.token, 'private-test-token');
+      assert(options.directory.endsWith('updates')); return done;
+    },
+    reloadWindow: async () => { reloads++; },
+  });
+  await assert.rejects(updates.reload(), /先完成/);
+  const first = updates.install(), second = updates.install();
+  assert.equal(first, second);
+  releaseInstall({ state: 'installed', version: '0.2.0', message: '安装完成' });
+  assert.equal((await first).state, 'installed');
+  await updates.install(); await updates.reload();
+  assert.equal(requests, 1); assert.equal(installs, 1); assert.equal(reloads, 1);
+});
+
+test('安装失败或取消后可重试，没有新版本及缺校验包时禁止调用安装', async () => {
+  let installs = 0;
+  const updates = new UpdateService(installContext(), {
+    request: async () => installRelease(), withProgress: progress,
+    install: async () => {
+      installs++;
+      if (installs === 1) throw new Error('模拟安装失败');
+      return installs === 2 ? { state: 'cancelled', message: '已取消' } : { state: 'installed', version: '0.2.0', message: '安装完成' };
+    },
+  });
+  await assert.rejects(updates.install(), /模拟安装失败/);
+  assert.equal((await updates.install()).state, 'cancelled');
+  assert.equal((await updates.install()).state, 'installed');
+  for (const response of [installRelease('0.1.8'), installRelease('0.1.7'), { status: 200, body: '{"tag_name":"v0.2.0","assets":[]}' }]) {
+    const blocked = new UpdateService(installContext(), { request: async () => response, withProgress: progress, install: async () => { assert.fail('不应安装'); } });
+    await assert.rejects(blocked.install());
+  }
+  assert.equal(installs, 3);
 });
