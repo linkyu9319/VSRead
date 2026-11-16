@@ -9,6 +9,9 @@ export const LATEST_RELEASE_API = 'https://api.github.com/repos/linkyu9319/VSRea
 const TOKEN_KEY = 'vsread.githubToken';
 const MAX_RESPONSE_BYTES = 512 * 1024;
 
+// VS Code 1.85 只拦截 CJS 的 vscode 加载；按需 require 兼容旧版 IDE 及纯 Node 测试。
+function vscodeApi(): typeof import('vscode') { return require('vscode'); }
+
 interface Version { core: bigint[]; prerelease: string[] }
 interface ReleaseResponse { status: number; body: string }
 export interface UpdateServiceOptions {
@@ -148,7 +151,7 @@ export class UpdateService {
 
   private async installOnce(): Promise<UpdateInstallResult> {
     const run = this.options.withProgress ?? (async task => {
-      const vscode = await import('vscode');
+      const vscode = vscodeApi();
       return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'VSRead · 更新插件', cancellable: true }, async (progress, cancellation) => {
         const controller = new AbortController();
         const subscription = cancellation.onCancellationRequested(() => controller.abort());
@@ -176,7 +179,7 @@ export class UpdateService {
       return (this.options.install ?? installUpdate)(asset, {
         directory: path.join(this.context.globalStorageUri.fsPath, 'updates'), token, signal, onProgress: report,
         install: this.options.installFile ?? (async file => {
-          const vscode = await import('vscode');
+          const vscode = vscodeApi();
           try { await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(file)); }
           catch { throw new Error('IDE 未能完成安装，请从发布页下载并手动安装。'); }
         }),
@@ -188,14 +191,14 @@ export class UpdateService {
     if (!this.installed) throw new Error('请先完成更新安装。');
     if (this.options.reloadWindow) await this.options.reloadWindow();
     else {
-      const vscode = await import('vscode');
+      const vscode = vscodeApi();
       await vscode.commands.executeCommand('workbench.action.reloadWindow');
     }
   }
 
   async open(): Promise<void> {
     const open = this.options.openExternal ?? (async url => {
-      const vscode = await import('vscode');
+      const vscode = vscodeApi();
       return vscode.env.openExternal(vscode.Uri.parse(url));
     });
     if (!await open(RELEASES_URL)) throw new Error('无法打开 GitHub 发布页面。');
@@ -205,7 +208,7 @@ export class UpdateService {
     if (action === 'clear') { await this.context.secrets.delete(TOKEN_KEY); return; }
     if (action !== 'set') throw new Error('GitHub 认证操作无效。');
     const input = this.options.inputToken ?? (async () => {
-      const vscode = await import('vscode');
+      const vscode = vscodeApi();
       return vscode.window.showInputBox({
         title: 'VSRead · GitHub 访问令牌', password: true, ignoreFocusOut: true,
         prompt: '访问私有发布仓库时使用；令牌仅保存在 IDE 的 SecretStorage。需仓库 Contents 读取权限。',

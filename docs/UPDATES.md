@@ -9,7 +9,7 @@ VSRead 从 `linkyu9319/VSRead` 的最新正式 GitHub Release 检查更新，按
 3. IDE 显示下载与安装进度；下载阶段可在进度通知中取消，取消不会替换当前版本。
 4. 安装成功后点击“重载窗口”，使新版生效。进入 IDE 安装阶段后，请等待安装结果。
 
-**0.1.8 及更早版本尚无一键更新功能。** 请先从 [GitHub Releases](https://github.com/linkyu9319/VSRead/releases/latest) 下载 0.1.9 的 VSIX，使用 IDE 的“从 VSIX 安装…”覆盖安装并重载，之后即可通过一键更新升级。同一 IDE 用户配置中的书库、进度和偏好会保留。
+**0.1.8 及更早版本尚无一键更新功能。** 请先从 [GitHub Releases](https://github.com/linkyu9319/VSRead/releases/latest) 下载最新 VSIX，使用 IDE 的“从 VSIX 安装…”覆盖安装并重载，之后即可通过一键更新升级。同一 IDE 用户配置中的书库、进度和偏好会保留。VS Code 1.85 请使用 0.1.10 或更高版本。
 
 公开仓库无需配置 GitHub 令牌。“查看发布页”始终提供手动安装入口；缺少安装包、没有有效的 SHA-256 摘要、下载或安装失败时，可在发布页下载 VSIX 手动安装。
 

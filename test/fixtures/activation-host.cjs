@@ -125,6 +125,8 @@ async function main() {
     assert(entries.some(item => item.command?.command === 'vsread.open'));
     assert(entries.some(item => item.command?.command === 'vsread.openLogs'));
     for (const command of manifest.contributes.commands) assert(commands.has(command.command), `激活后缺少命令 ${command.command}`);
+    // 模拟旧版只提供 CJS vscode 拦截的 Host；默认 API 分支也必须可加载。
+    await vscode.commands.executeCommand('vsread.configureUpdateToken');
 
     await vscode.commands.executeCommand('vsread.open');
     assert.equal(panels.length, 1);
