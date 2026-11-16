@@ -40,6 +40,7 @@ export interface Requests extends OnlineRequests {
   encoding: { args: { id: string; encoding: TextEncoding }; result: OpenBook };
   remove: { args: { id: string }; result: Library };
   focus: { args: { enabled: boolean }; result: void };
+  'diagnostics.open': { args: undefined; result: void };
 }
 export interface RpcRequest { id: string; method: keyof Requests; args?: unknown }
 export type RpcResponse = { id: string; result?: unknown; error?: string };

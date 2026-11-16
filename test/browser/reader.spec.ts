@@ -21,6 +21,7 @@ async function mockHost(page: Page) {
         let result;
         const book = args?.id && library.books.find((book: any) => book.id === args.id);
         if (method === 'init' || method === 'import') result = library;
+        if (method === 'online.list' || method === 'sources.list') result = [];
         if (method === 'open' || method === 'encoding') {
           library.lastBookId = book.id;
           result = { book, ...(book.format === 'txt' ? { textIndex: (await textData()).index } : {}) };

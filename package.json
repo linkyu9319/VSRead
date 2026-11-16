@@ -3,7 +3,7 @@
   "displayName": "VSRead · 青菜阅读",
   "icon": "media/icon.png",
   "description": "支持本地 EPUB、TXT、PDF 与在线书源，自动保存进度，让故事住进 IDE。",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "vsread-local",
   "private": true,
   "repository": {
@@ -67,6 +67,7 @@
       },
       { "command": "vsread.sources", "title": "VSRead: 在线书源", "icon": "$(globe)" },
       { "command": "vsread.toggleFocusMode", "title": "VSRead: 切换专注阅读", "icon": "$(screen-full)" },
+      { "command": "vsread.openLogs", "title": "VSRead: 打开诊断日志", "icon": "$(output)" },
       { "command": "vsread.checkUpdates", "title": "VSRead: 检查更新", "icon": "$(versions)" },
       { "command": "vsread.configureUpdateToken", "title": "VSRead: 配置更新访问令牌" },
       { "command": "vsread.clearUpdateToken", "title": "VSRead: 清除更新访问令牌" }
@@ -103,7 +104,7 @@
     "test": "tsx --test test/*.test.ts",
     "test:browser": "playwright test",
     "check": "npm run typecheck && npm run build && npm test",
-    "package": "npm run check && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links --out vsread-0.1.4.vsix",
+    "package": "npm run check && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links --out vsread-0.1.5.vsix",
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {

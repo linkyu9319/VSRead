@@ -5,16 +5,20 @@ import { isIP, type LookupFunction } from 'node:net';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import type { Readable } from 'node:stream';
 import iconv from 'iconv-lite';
+import { diagnosticError, diagnosticUrl } from '../diagnostics';
+import { retryTransientRequest } from './networkRetry';
 
-export interface RequestTextOptions { maxBytes?: number; headers?: Record<string, string>; signal?: AbortSignal }
+export interface NetworkTrace extends Record<string, unknown> { stage: string; url: string; elapsedMs: number }
+export interface RequestTextOptions { maxBytes?: number; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; onTrace?(event: NetworkTrace): void }
 export interface TextResponse { text: string; url: string }
 export type TextFetcher = (url: string, options?: RequestTextOptions) => Promise<TextResponse>;
 
 /** 固定到已验证地址，同时兼容 Node 18 单地址与 Node 22 all=true 的查询约定。 */
-export function pinnedLookup(address: { address: string; family: number }): LookupFunction {
+export function pinnedLookup(address: { address: string; family: number } | { address: string; family: number }[]): LookupFunction {
+  const addresses = Array.isArray(address) ? address : [address];
   return (_hostname, options, callback) => {
-    if (options.all) callback(null, [{ address: address.address, family: address.family }]);
-    else callback(null, address.address, address.family);
+    if (options.all) callback(null, addresses.map(item => ({ ...item })));
+    else { const selected = addresses.find(item => item.family === options.family) ?? addresses[0]; callback(null, selected.address, selected.family); }
   };
 }
 
@@ -48,13 +52,21 @@ export const requestText: TextFetcher = async (input, options = {}) => {
   let url = validateHttpUrl(input);
   const maxBytes = Math.min(8 * 1024 * 1024, Math.max(1024, options.maxBytes ?? 2 * 1024 * 1024));
   const controller = new AbortController();
+  const started = Date.now();
+  let stage = 'dns';
+  const trace = (name: string, details: Record<string, unknown> = {}) => {
+    try { options.onTrace?.({ stage: name, url: diagnosticUrl(url.href), elapsedMs: Date.now() - started, ...details }); } catch { /* 诊断输出失败不阻断网络请求。 */ }
+  };
   const abort = () => controller.abort(options.signal?.reason ?? new Error('网络请求已取消'));
   if (options.signal?.aborted) abort();
   else options.signal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => controller.abort(new Error('网络请求超时，请稍后重试')), 15_000);
+  const timeoutMs = Math.min(60_000, Math.max(250, options.timeoutMs ?? 30_000));
+  const timer = setTimeout(() => controller.abort(Object.assign(new Error(`网络请求超时（${url.hostname}，${stage}阶段），请稍后重试`), { code: 'ETIMEDOUT' })), timeoutMs);
   let headers = { ...options.headers };
   try {
     for (let redirect = 0; redirect <= 3; redirect++) {
+      controller.signal.throwIfAborted();
+      stage = 'dns'; trace(stage);
       controller.signal.throwIfAborted();
       const hostname = url.hostname.replace(/^\[|\]$/g, '');
       const addresses = await new Promise<{ address: string; family: number }[]>((resolve, reject) => {
@@ -64,15 +76,21 @@ export const requestText: TextFetcher = async (input, options = {}) => {
       });
       controller.signal.throwIfAborted();
       if (!addresses.length || addresses.some(address => !publicAddress(address.address))) throw new Error('书源域名指向私有网络，已停止访问');
-      const selected = addresses.find(address => address.family === 4) ?? addresses[0];
-      const result = await new Promise<{ bytes?: Buffer; location?: string; charset?: string }>((resolve, reject) => {
+      trace('dns.complete', { addressCount: addresses.length, addresses: addresses.slice(0, 8).map(item => item.address) });
+      controller.signal.throwIfAborted();
+      const send = () => {
+        stage = 'connect';
+        return new Promise<{ bytes?: Buffer; location?: string; charset?: string }>((resolve, reject) => {
         const transport = url.protocol === 'https:' ? https : http;
-        const request = transport.get(url, {
+        const requestOptions = {
           signal: controller.signal,
           headers: { 'User-Agent': 'VSRead/0.1', Accept: 'text/html,application/json;q=0.9,*/*;q=0.5', 'Accept-Encoding': 'gzip, deflate, br', ...headers },
-          family: selected.family,
-          lookup: pinnedLookup(selected),
-        }, response => {
+          // 所有候选 IP 均已验证；Node 在连接失败时尝试其它地址，避免只卡在首个 IPv4。
+          family: 0, autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 500,
+          lookup: pinnedLookup(addresses),
+        };
+        const request = transport.get(url, requestOptions, response => {
+          stage = 'response'; trace(stage, { status: response.statusCode });
           if ([301, 302, 303, 307, 308].includes(response.statusCode ?? 0)) {
             const location = response.headers.location;
             response.destroy();
@@ -81,7 +99,7 @@ export const requestText: TextFetcher = async (input, options = {}) => {
             return;
           }
           if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-            response.destroy(); reject(new Error(`网络请求失败（HTTP ${response.statusCode ?? 0}）`)); return;
+            response.destroy(); reject(Object.assign(new Error(`网络请求失败（HTTP ${response.statusCode ?? 0}）`), { code: `HTTP_${response.statusCode ?? 0}` })); return;
           }
           const encoding = response.headers['content-encoding']?.toLowerCase();
           let stream: Readable = response;
@@ -90,6 +108,7 @@ export const requestText: TextFetcher = async (input, options = {}) => {
           else if (encoding === 'br') stream = response.pipe(createBrotliDecompress());
           else if (encoding && encoding !== 'identity') { response.destroy(); reject(new Error('不支持该响应压缩格式')); return; }
           let bytes = 0;
+          stage = 'download';
           const chunks: Buffer[] = [];
           stream.on('data', (chunk: Buffer) => {
             bytes += chunk.length;
@@ -97,18 +116,29 @@ export const requestText: TextFetcher = async (input, options = {}) => {
             else chunks.push(chunk);
           });
           response.on('error', reject); stream.on('error', reject);
-          stream.on('end', () => resolve({ bytes: Buffer.concat(chunks), charset: /charset\s*=\s*["']?([^;\s"']+)/i.exec(response.headers['content-type'] ?? '')?.[1] }));
+          response.on('aborted', () => reject(Object.assign(new Error('书源提前中断响应，请重试'), { code: 'ECONNRESET' })));
+          stream.on('end', () => { trace('download.complete', { bytes }); resolve({ bytes: Buffer.concat(chunks), charset: /charset\s*=\s*["']?([^;\s"']+)/i.exec(response.headers['content-type'] ?? '')?.[1] }); });
+        });
+        request.on('socket', socket => {
+          const connected = () => { stage = url.protocol === 'https:' ? 'tls' : 'response'; trace('connect.complete', { address: socket.remoteAddress }); };
+          if (socket.connecting) socket.once('connect', connected);
+          else { stage = 'response'; trace('connect.reused', { address: socket.remoteAddress }); }
+          socket.once('secureConnect', () => { stage = 'response'; trace('tls.complete'); });
         });
         request.on('error', reject);
-      });
+        });
+      };
+      const result = await retryTransientRequest(send, controller.signal, errorCode => trace('retry', { errorCode, attempt: 2 }));
       if (result.location) {
         if (redirect === 3) throw new Error('网络跳转次数过多');
         const next = validateHttpUrl(new URL(result.location, url).href);
         if (next.origin !== url.origin) headers = {};
+        trace('redirect', { target: diagnosticUrl(next.href) });
         url = next;
         continue;
       }
       const bytes = result.bytes!;
+      stage = 'decode';
       const declared = result.charset || /<meta[^>]+charset\s*=\s*["']?([^\s"'/>;]+)/i.exec(bytes.subarray(0, 4096).toString('ascii'))?.[1];
       let charset = declared?.toLowerCase();
       if (!charset) {
@@ -116,11 +146,14 @@ export const requestText: TextFetcher = async (input, options = {}) => {
         catch { charset = 'gb18030'; }
       }
       if (!iconv.encodingExists(charset)) throw new Error(`不支持的网页编码：${charset}`);
-      return { text: iconv.decode(bytes, charset).replace(/^\uFEFF/, ''), url: url.href };
+      const text = iconv.decode(bytes, charset).replace(/^\uFEFF/, '');
+      trace('complete', { bytes: bytes.length, charset });
+      return { text, url: url.href };
     }
     throw new Error('网络请求未完成');
   } catch (error) {
-    if (controller.signal.aborted) throw controller.signal.reason instanceof Error ? controller.signal.reason : new Error('网络请求已取消');
+    if (controller.signal.aborted) error = controller.signal.reason instanceof Error ? controller.signal.reason : new Error('网络请求已取消');
+    trace('error', { failedStage: stage, ...diagnosticError(error) });
     throw error;
   } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); }
 };

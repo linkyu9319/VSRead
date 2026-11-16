@@ -12,6 +12,7 @@ async function mockOnlineHost(page: Page) {
   await page.addInitScript(({ configuredSource }) => {
     const settings = { theme: 'light', fontSize: 19, lineHeight: 1.9, fontFamily: 'serif', flow: 'scrolled', zoom: 1, backgroundColor: '#faf8f2', textColor: '#302e2a' };
     const state = JSON.parse(localStorage.getItem('online-fixture') ?? '{"sources":[],"books":[]}');
+    const localBooks = JSON.parse(localStorage.getItem('local-fixture') ?? '[]');
     (window as any).__onlineRpc = [];
     window.acquireVsCodeApi = () => ({
       getState: () => JSON.parse(localStorage.getItem('fixture-view') ?? '{}'), setState: value => localStorage.setItem('fixture-view', JSON.stringify(value)),
@@ -21,7 +22,12 @@ async function mockOnlineHost(page: Page) {
           let result: any;
           const book = state.books.find((book: any) => book.id === args?.id);
           switch (method) {
-            case 'init': result = { version: 1, books: [], settings }; break;
+            case 'init': result = { version: 1, books: localBooks, settings }; break;
+            case 'remove': {
+              const index = localBooks.findIndex((item: any) => item.id === args.id);
+              if (index >= 0) localBooks.splice(index, 1);
+              result = { version: 1, books: localBooks, settings }; break;
+            }
             case 'sources.list': result = state.sources; break;
             case 'sources.builtin.list': result = []; break;
             case 'sources.builtin.add': throw new Error('此回归未使用内置书源');
@@ -38,6 +44,7 @@ async function mockOnlineHost(page: Page) {
             case 'sources.toggle': state.sources[0].enabled = args.enabled; result = state.sources; break;
             case 'sources.remove': state.sources = state.sources.filter((item: any) => item.id !== args.id); result = state.sources; break;
             case 'online.search':
+              if ((window as any).__failSearch) throw new Error('网络请求超时，请稍后重试');
               if ((window as any).__offline) throw new Error('网络不可用');
               result = [{ sourceId: configuredSource.id, title: '星海在线', author: '测试作者', url: 'https://fiction.example/book/one' }];
               break;
@@ -74,9 +81,11 @@ async function mockOnlineHost(page: Page) {
             case 'updates.auth': (window as any).__authAction = args.action; break;
             case 'settings': Object.assign(settings, args); break;
             case 'focus': break;
+            case 'diagnostics.open': (window as any).__logsOpened = true; break;
             default: throw new Error(`未模拟的请求 ${method}`);
           }
           localStorage.setItem('online-fixture', JSON.stringify(state));
+          localStorage.setItem('local-fixture', JSON.stringify(localBooks));
           const response = structuredClone({ id, result });
           setTimeout(() => window.postMessage(response, '*'), 0);
         } catch (error) { window.postMessage({ id, error: (error as Error).message }, '*'); }
@@ -85,7 +94,11 @@ async function mockOnlineHost(page: Page) {
   }, { configuredSource: source });
 }
 
-test.beforeEach(async ({ page }) => { await mockOnlineHost(page); await page.goto('/'); });
+test.beforeEach(async ({ page }) => {
+  await mockOnlineHost(page); await page.goto('/');
+  await expect(page.getByRole('region', { name: '我的书架', exact: true })).toBeVisible();
+  await expect(page.locator('.shelf-loading')).toHaveCount(0);
+});
 
 test('书源导入、搜索、章节缓存、离线重开与进度恢复', async ({ page }) => {
   await page.getByRole('button', { name: '在线书源', exact: true }).click();
@@ -103,9 +116,10 @@ test('书源导入、搜索、章节缓存、离线重开与进度恢复', async
   await page.getByLabel('搜索书名或作者').fill('星海');
   await page.getByRole('button', { name: '搜索', exact: true }).click();
   await page.getByRole('button', { name: '加入书架', exact: true }).click();
-  const shelf = page.getByRole('region', { name: '在线书架', exact: true });
+  await page.getByRole('button', { name: '查看我的书架', exact: true }).click();
+  const shelf = page.getByRole('region', { name: '我的书架', exact: true });
   await expect(shelf).toContainText('星海在线');
-  await shelf.getByRole('button', { name: '开始阅读', exact: true }).click();
+  await shelf.getByRole('button', { name: '阅读 星海在线', exact: true }).click();
   await expect(page.locator('.online-chapter-content')).toContainText('第一章 星海');
   await page.getByRole('button', { name: '第二章 远航', exact: true }).click();
   await expect(page.locator('.online-chapter-content')).toContainText('第二章 远航');
@@ -115,19 +129,18 @@ test('书源导入、搜索、章节缓存、离线重开与进度恢复', async
   await page.getByRole('button', { name: '缓存章节', exact: true }).click();
   await expect(page.locator('.online-message')).toContainText('成功 2 章');
   await page.evaluate(() => { (window as any).__offline = true; });
-  await page.getByRole('button', { name: '在线书架', exact: true }).click();
-  await shelf.getByRole('button', { name: '继续阅读', exact: true }).click();
+  await page.getByRole('region', { name: '在线阅读器', exact: true }).getByRole('button', { name: '返回书架', exact: true }).click();
+  await shelf.getByRole('button', { name: '阅读 星海在线', exact: true }).click();
   await expect(page.locator('.online-chapter-content')).toContainText('第二章 远航');
   await expect.poll(() => page.getByTestId('online-reading-surface').evaluate(element => element.scrollTop)).toBeGreaterThan(300);
   await expect(page.locator('.online-reader .page-controls')).toContainText('离线缓存');
   await page.getByRole('button', { name: '下一章', exact: true }).click();
   await expect(page.locator('.online-chapter-content')).toContainText('第三章 归途');
-  await page.getByRole('button', { name: '在线书架', exact: true }).click();
+  await page.getByRole('region', { name: '在线阅读器', exact: true }).getByRole('button', { name: '返回书架', exact: true }).click();
   await page.screenshot({ path: '.test-data/online-shelf.png' });
   await expect(page.getByRole('alert')).toHaveCount(0);
   await page.reload();
-  await page.getByRole('button', { name: '在线书源', exact: true }).click();
-  await page.getByRole('region', { name: '在线书架', exact: true }).getByRole('button', { name: '继续阅读', exact: true }).click();
+  await page.getByRole('region', { name: '我的书架', exact: true }).getByRole('button', { name: '阅读 星海在线', exact: true }).click();
   await expect(page.locator('.online-chapter-content')).toContainText('第三章 归途');
   await expect(page.locator('.online-reader .page-controls')).toContainText('进度已保存');
   await page.reload();
@@ -162,8 +175,7 @@ async function openSavedOnlineBook(page: Page, chapter = 0, scroll = 0) {
   };
   await page.evaluate(({ source, book }) => localStorage.setItem('online-fixture', JSON.stringify({ sources: [source], books: [book] })), { source, book });
   await page.reload();
-  await page.getByRole('button', { name: '在线书源', exact: true }).click();
-  await page.getByRole('region', { name: '在线书架', exact: true }).getByRole('button', { name: '继续阅读', exact: true }).click();
+  await page.getByRole('region', { name: '我的书架', exact: true }).getByRole('button', { name: '阅读 星海在线', exact: true }).click();
   await expect(page.locator('.online-chapter-content h3')).toHaveText(book.chapters[chapter].title);
   await expect(page.getByRole('button', { name: '刷新本章', exact: true })).toBeEnabled();
 }
@@ -222,8 +234,8 @@ test('在线章节末尾连续切章回到章首，重开才恢复保存位置',
   await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBe(0);
   await surface.evaluate(element => { element.scrollTop = 620; element.dispatchEvent(new Event('scroll', { bubbles: true })); });
   await expect(page.locator('.online-reader .page-controls')).toContainText('进度已保存');
-  await page.getByRole('button', { name: '在线书架', exact: true }).click();
-  await page.getByRole('region', { name: '在线书架', exact: true }).getByRole('button', { name: '继续阅读', exact: true }).click();
+  await page.getByRole('region', { name: '在线阅读器', exact: true }).getByRole('button', { name: '返回书架', exact: true }).click();
+  await page.getByRole('region', { name: '我的书架', exact: true }).getByRole('button', { name: '阅读 星海在线', exact: true }).click();
   await expect(page.locator('.online-chapter-content h3')).toHaveText('第三章 归途');
   await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBeGreaterThan(580);
   await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBeLessThan(660);
@@ -253,4 +265,52 @@ test('在线专注模式改变视口后保持章节位置并支持键盘切章',
   await expect(page.locator('.online-toc')).toBeVisible();
   await expect.poll(() => surface.evaluate(element => element.scrollTop)).toBe(0);
   await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('我的书架混排本地与在线书籍，继续阅读与移除互不影响', async ({ page }) => {
+  await page.evaluate(() => localStorage.setItem('local-fixture', JSON.stringify([
+    { id: 'a'.repeat(64), format: 'txt', title: '本地星海', importedAt: '2026-11-12T00:00:00.000Z', size: 100 },
+    { id: 'b'.repeat(64), format: 'pdf', title: '本地远航', importedAt: '2026-11-11T00:00:00.000Z', size: 100 },
+  ])));
+  await openSavedOnlineBook(page, 1, .25);
+  await page.getByRole('button', { name: '我的书架', exact: true }).click();
+  const shelf = page.getByRole('region', { name: '我的书架', exact: true });
+  await expect(shelf.locator('.book-card')).toHaveCount(3);
+  await expect(shelf.locator('.shelf-summary')).toHaveText('本地 2 本 · 在线 1 本');
+  const online = shelf.locator('[data-book-kind="online"]');
+  await expect(online).toContainText('在线 · 测试书源');
+  await expect(online).toContainText('已缓存 3 / 3 章');
+  await expect(online).toContainText('继续阅读');
+  await page.screenshot({ path: '.test-data/unified-shelf.png' });
+  await shelf.getByRole('button', { name: '阅读 星海在线', exact: true }).click();
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第二章 远航');
+  await page.getByRole('region', { name: '在线阅读器', exact: true }).getByRole('button', { name: '返回书架', exact: true }).click();
+  await shelf.getByRole('button', { name: '移除 本地星海', exact: true }).click();
+  await expect(shelf.locator('.book-card')).toHaveCount(2);
+  await expect(online).toContainText('星海在线');
+  await expect(shelf).toContainText('本地远航');
+  await shelf.getByRole('button', { name: '移除在线书籍 星海在线', exact: true }).click();
+  await shelf.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(online).toHaveCount(1);
+  await shelf.getByRole('button', { name: '移除在线书籍 星海在线', exact: true }).click();
+  await shelf.getByRole('button', { name: '确定移除', exact: true }).click();
+  await expect(shelf.locator('.book-card')).toHaveCount(1);
+  await expect(shelf).toContainText('本地远航');
+  await expect(shelf.locator('.shelf-summary')).toHaveText('本地 1 本 · 在线 0 本');
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('online-fixture')!).sources.length)).toBe(1);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('书源报错可从错误提示直接打开本地诊断日志', async ({ page }) => {
+  await page.getByRole('button', { name: '在线书源', exact: true }).click();
+  await page.getByRole('button', { name: '导入书源', exact: true }).click();
+  await page.getByLabel('书源 JSON', { exact: true }).fill(JSON.stringify(source));
+  await page.getByRole('button', { name: '导入书源', exact: true }).click();
+  await expect(page.locator('.source-import-report')).toContainText('已导入 1 个书源');
+  await page.evaluate(() => { (window as any).__failSearch = true; });
+  await page.getByLabel('搜索书名或作者').fill('超时测试');
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('网络请求超时');
+  await page.getByRole('alert').getByRole('button', { name: '查看日志', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__logsOpened)).toBe(true);
 });

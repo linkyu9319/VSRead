@@ -2,10 +2,11 @@ import path from 'node:path';
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import type { BookSource, BuiltinSourceSummary, OnlineBookRecord, OnlineChapter, OnlineChapterContent, OnlineSearchResult, SourceImportResult } from '../../shared/online';
 import { boundedNumber, isRecord } from '../../shared/validation';
-import { requestText, type TextFetcher } from './network';
+import { requestText, type TextFetcher, type TextResponse } from './network';
 import { normalizeSource, resolveSourceUrl, stableId } from './rules';
 import { getBuiltinSource, listBuiltinSources } from './builtins';
 import { sourceDocument } from './document';
+import { diagnosticError, diagnosticUrl, type DiagnosticSink } from '../diagnostics';
 
 interface StoredBook extends OnlineBookRecord { cacheSizes: Record<string, number> }
 interface State { version: 1; sources: BookSource[]; books: StoredBook[] }
@@ -16,13 +17,14 @@ const clone = <T>(value: T): T => structuredClone(value);
 export class OnlineLibrary {
   private state: State = { version: 1, sources: [], books: [] };
   private writes = Promise.resolve();
-  private network = Promise.resolve();
+  private network = new Map<string, Promise<void>>();
   private fetchText: TextFetcher;
   private activeChapters = new Map<string, Promise<OnlineChapterContent>>();
   private bookOperations = new Map<string, Promise<unknown>>();
   private cacheWrites = Promise.resolve();
   private sourceOperations = Promise.resolve();
-  constructor(readonly root: string, options: { fetchText?: TextFetcher } = {}) { this.fetchText = options.fetchText ?? requestText; }
+  private log?: DiagnosticSink;
+  constructor(readonly root: string, options: { fetchText?: TextFetcher; log?: DiagnosticSink } = {}) { this.fetchText = options.fetchText ?? requestText; this.log = options.log; }
 
   async load(): Promise<void> {
     await mkdir(path.join(this.root, 'cache'), { recursive: true });
@@ -58,7 +60,7 @@ export class OnlineLibrary {
 
   async importSources(input: { json?: string; url?: string }): Promise<SourceImportResult> {
     if (typeof input.json !== 'string' && typeof input.url !== 'string') throw new Error('请提供书源 JSON 或订阅地址');
-    const json = input.url ? (await this.request(input.url, 2 * 1024 * 1024)).text : input.json!;
+    const json = input.url ? (await this.request(input.url, 2 * 1024 * 1024, { operation: 'import', source: '外部书源配置' })).text : input.json!;
     if (Buffer.byteLength(json, 'utf8') > 2 * 1024 * 1024) throw new Error('书源 JSON 不能超过 2 MB');
     let values: unknown;
     try { values = JSON.parse(json); } catch { throw new Error('书源 JSON 格式无效'); }
@@ -98,8 +100,8 @@ export class OnlineLibrary {
     if (typeof query !== 'string' || !query.trim() || query.length > 200) throw new Error('搜索内容需要 1–200 个字符');
     if (!Number.isSafeInteger(page) || page < 1 || page > 100) throw new Error('搜索页码无效');
     const target = source.searchUrl.replace(/\{\{\s*key\s*\}\}/g, encodeURIComponent(query.trim())).replace(/\{\{\s*page\s*\}\}/g, String(page));
-    const response = await this.request(resolveSourceUrl(source, target));
-    const document = sourceDocument(source, response.text);
+    const response = await this.request(resolveSourceUrl(source, target), undefined, { operation: 'search', source: source.name });
+    const document = this.parsePage(source, response, 'search');
     const results: OnlineSearchResult[] = [];
     const seen = new Set<string>();
     for (const item of document.rows(source.search.bookList).slice(0, 100)) {
@@ -227,9 +229,24 @@ export class OnlineLibrary {
     }
   }
 
-  private request(url: string, maxBytes?: number) {
-    const operation = this.network.then(() => this.fetchText(url, { maxBytes }));
-    this.network = operation.then(() => undefined, () => undefined);
+  private request(url: string, maxBytes?: number, context: { operation: string; source: string } = { operation: 'request', source: '在线书源' }) {
+    const origin = new URL(url).origin;
+    const queued = Date.now();
+    // 同站点保持串行，避免触发频率限制；一个站点超时不再阻塞其它书源。
+    const operation = (this.network.get(origin) ?? Promise.resolve()).then(async () => {
+      const started = Date.now();
+      this.log?.('info', 'online.request', { ...context, url: diagnosticUrl(url), queuedMs: started - queued });
+      try {
+        return await this.fetchText(url, { maxBytes, onTrace: event => this.log?.(event.stage === 'error' ? 'error' : 'info', 'network.' + event.stage, { ...context, ...event }) });
+      } catch (error) {
+        this.log?.('error', 'online.request_failed', { ...context, url: diagnosticUrl(url), elapsedMs: Date.now() - started, ...diagnosticError(error) });
+        const labels: Record<string, string> = { search: '搜索', 'book-info': '书籍信息', toc: '目录', chapter: '章节正文', import: '书源导入' };
+        throw new Error(`「${context.source}」${labels[context.operation] ?? '请求'}失败：${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+    });
+    const tail = operation.then(() => undefined, () => undefined);
+    this.network.set(origin, tail);
+    void tail.then(() => { if (this.network.get(origin) === tail) this.network.delete(origin); });
     return operation;
   }
   private withBook<T>(id: string, operation: () => Promise<T>): Promise<T> {
@@ -237,6 +254,13 @@ export class OnlineLibrary {
     this.bookOperations.set(id, pending);
     void pending.finally(() => { if (this.bookOperations.get(id) === pending) this.bookOperations.delete(id); }).catch(() => undefined);
     return pending;
+  }
+  private parsePage(source: BookSource, response: TextResponse, operation: string) {
+    try { return sourceDocument(source, response.text); }
+    catch (error) {
+      this.log?.('error', 'online.parse_failed', { source: source.name, operation, url: diagnosticUrl(response.url), ...diagnosticError(error) });
+      throw new Error(`「${source.name}」解析失败：${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
   }
   private source(id: string, requireEnabled = false): BookSource {
     const source = this.state.sources.find(source => source.id === id);
@@ -257,8 +281,8 @@ export class OnlineLibrary {
   private cacheFile(book: StoredBook, chapter: OnlineChapter): string { return path.join(this.root, 'cache', book.id, chapter.id + '.txt'); }
   private syncCached(book: StoredBook): void { book.cachedChapters = book.chapters.flatMap((chapter, index) => book.cacheSizes[chapter.id] === undefined ? [] : [index]); }
   private async refreshToc(book: StoredBook, source: BookSource): Promise<void> {
-    const response = await this.request(resolveSourceUrl(source, book.url));
-    let document = sourceDocument(source, response.text);
+    const response = await this.request(resolveSourceUrl(source, book.url), undefined, { operation: 'book-info', source: source.name });
+    let document = this.parsePage(source, response, 'book-info');
     const info = document.scope(source.bookInfo?.init);
     const title = info.read(source.bookInfo?.name);
     const author = info.read(source.bookInfo?.author);
@@ -266,7 +290,7 @@ export class OnlineLibrary {
     let base = response.url;
     if (tocHref) {
       const target = resolveSourceUrl(source, tocHref, base);
-      if (target !== base) { const tocPage = await this.request(target); document = sourceDocument(source, tocPage.text); base = tocPage.url; }
+      if (target !== base) { const tocPage = await this.request(target, undefined, { operation: 'toc', source: source.name }); document = this.parsePage(source, tocPage, 'toc'); base = tocPage.url; }
     }
     const chapters: OnlineChapter[] = [];
     const seen = new Set<string>();
@@ -281,7 +305,10 @@ export class OnlineLibrary {
         chapters.push({ id: stableId(url), title, url });
       } catch { /* 外部导航不属于当前书源目录。 */ }
     }
-    if (!chapters.length) throw new Error('没有解析到章节，请检查目录规则或站点是否需要登录/脚本');
+    if (!chapters.length) {
+      this.log?.('warn', 'online.empty_toc', { source: source.name, operation: 'toc', url: diagnosticUrl(base) });
+      throw new Error(`「${source.name}」没有解析到章节，请检查目录规则或站点是否需要登录/脚本`);
+    }
     const oldChapter = book.progress && book.chapters[book.progress.chapter]?.id;
     if (oldChapter && book.progress) {
       const index = chapters.findIndex(chapter => chapter.id === oldChapter);
@@ -294,9 +321,12 @@ export class OnlineLibrary {
   }
   private async fetchChapter(book: StoredBook, chapter: OnlineChapter): Promise<OnlineChapterContent> {
     const source = this.source(book.sourceId, true);
-    const response = await this.request(resolveSourceUrl(source, chapter.url));
-    const text = sourceDocument(source, response.text).read(source.content.content, 'content');
-    if (!text) throw new Error('正文为空，请检查正文规则或该章节是否需要登录/脚本');
+    const response = await this.request(resolveSourceUrl(source, chapter.url), undefined, { operation: 'chapter', source: source.name });
+    const text = this.parsePage(source, response, 'chapter').read(source.content.content, 'content');
+    if (!text) {
+      this.log?.('warn', 'online.empty_content', { source: source.name, operation: 'chapter', url: diagnosticUrl(response.url) });
+      throw new Error(`「${source.name}」正文为空，请检查正文规则或该章节是否需要登录/脚本`);
+    }
     // 不同书籍也共享缓存预算；把检查和提交串行化，避免并发下载同时越过体积上限。
     const operation = this.cacheWrites.then(async () => {
     const bytes = Buffer.byteLength(text, 'utf8');

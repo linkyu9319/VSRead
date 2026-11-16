@@ -14,6 +14,7 @@ export function registerSidebar(context: vscode.ExtensionContext): void {
     action('导入本地电子书', 'vsread.import', 'add', '导入本地 EPUB、TXT 或 PDF'),
     action('在线书源', 'vsread.sources', 'globe', '管理书源、搜索与阅读在线书籍'),
     action('检查更新', 'vsread.checkUpdates', 'versions', '检查 GitHub 上的最新稳定版本'),
+    action('打开诊断日志', 'vsread.openLogs', 'output', '查看本地书源请求和错误日志'),
   ];
   const provider: vscode.TreeDataProvider<vscode.TreeItem> = {
     getTreeItem: item => item,

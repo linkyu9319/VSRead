@@ -10,19 +10,30 @@ import { UpdateService } from './updates';
 import { isRecord, normalizeSettings, validateProgress } from '../shared/validation';
 import type { OpenBook, RpcRequest, TextEncoding } from '../shared/model';
 import type { OnlineSearchResult } from '../shared/online';
+import { DiagnosticLog, diagnosticError } from './diagnostics';
 
 let store: LibraryStore | undefined;
 let onlineStore: OnlineLibrary | undefined;
+let diagnostics: DiagnosticLog | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const output = vscode.window.createOutputChannel('VSRead');
+  context.subscriptions.push(output);
+  const log = diagnostics = new DiagnosticLog(context.logUri.fsPath, { output: line => output.appendLine(line) });
+  log.write('info', 'extension.activate', { version: context.extension.packageJSON.version, ide: vscode.env.appName, ideVersion: vscode.version, node: process.versions.node, transport: 'node-http', proxyConfigured: !!vscode.workspace.getConfiguration('http').get('proxy') });
+  const openLogs = async () => {
+    await log.flush();
+    try { await vscode.window.showTextDocument(vscode.Uri.file(log.filePath), { preview: true }); }
+    catch (error) { output.show(); log.write('error', 'diagnostics.open_failed', diagnosticError(error)); }
+  };
   const libraryStore = new LibraryStore(context.globalStorageUri.fsPath);
   await libraryStore.load();
   store = libraryStore;
   const library = new BookLibrary(libraryStore, path.join(context.extensionPath, 'dist', 'txtWorker.cjs'));
-  const online = new OnlineLibrary(path.join(context.globalStorageUri.fsPath, 'online'));
+  const online = new OnlineLibrary(path.join(context.globalStorageUri.fsPath, 'online'), { log: log.write });
   let onlineError: string | undefined;
   try { await online.load(); onlineStore = online; }
-  catch (error) { onlineError = `在线书库暂不可用：${errorMessage(error)}`; }
+  catch (error) { onlineError = `在线书库暂不可用：${errorMessage(error)}`; log.write('error', 'online.load_failed', diagnosticError(error)); }
   const updates = new UpdateService(context);
   let panel: vscode.WebviewPanel | undefined;
   let importing = false;
@@ -83,6 +94,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     target.webview.onDidReceiveMessage(async (message: unknown) => {
       if (!isRecord(message) || typeof message.id !== 'string' || message.id.length > 100 || typeof message.method !== 'string') return;
       const request = message as unknown as RpcRequest;
+      const started = Date.now();
+      const traced = /^(online\.(search|add|open|chapter|cache)|sources\.(import|builtin\.add))$/.test(request.method);
+      if (traced) log.write('info', 'rpc.start', { method: request.method, requestId: request.id });
       try {
         const args = isRecord(request.args) ? request.args : {};
         // 在线数据损坏只影响在线功能，本地文件阅读仍可正常使用。
@@ -95,6 +109,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             setPanelFocus(target, args.enabled);
             break;
           }
+          case 'diagnostics.open': await openLogs(); break;
           case 'import': await importBooks(); result = libraryStore.data; break;
           case 'open': result = await openBook(args.id); break;
           case 'text': result = await library.text(library.book(args.id), args.part); break;
@@ -163,8 +178,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           }
           default: throw new Error('不支持的阅读器请求');
         }
+        if (traced) log.write('info', 'rpc.complete', { method: request.method, requestId: request.id, elapsedMs: Date.now() - started });
         await target.webview.postMessage({ id: request.id, result });
-      } catch (error) { await target.webview.postMessage({ id: request.id, error: errorMessage(error) }); }
+      } catch (error) {
+        log.write('error', 'rpc.failed', { method: request.method, requestId: request.id, elapsedMs: Date.now() - started, ...diagnosticError(error) });
+        await target.webview.postMessage({ id: request.id, error: errorMessage(error) });
+      }
     }, null, context.subscriptions);
     target.webview.html = await renderWebview(target.webview, context.extensionUri);
   };
@@ -177,6 +196,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   context.subscriptions.push(
     vscode.commands.registerCommand('vsread.open', async () => { requestedView = undefined; await show(); }),
+    vscode.commands.registerCommand('vsread.openLogs', openLogs),
     vscode.commands.registerCommand('vsread.toggleFocusMode', async () => {
       if (panel) await panel.webview.postMessage({ event: 'focus', enabled: !focusMode });
       else { requestedFocus = true; setPanelFocus(await show(), true); }
@@ -210,4 +230,4 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function requiredString(value: unknown): string { if (typeof value !== 'string' || !value.trim()) throw new Error('请求参数无效'); return value; }
 function optionalString(value: unknown): string | undefined { if (value === undefined) return undefined; return requiredString(value); }
-export async function deactivate(): Promise<void> { await Promise.all([store?.flush(), onlineStore?.flush()]); }
+export async function deactivate(): Promise<void> { await Promise.all([store?.flush(), onlineStore?.flush()]); await diagnostics?.flush(); }
