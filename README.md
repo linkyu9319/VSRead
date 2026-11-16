@@ -78,8 +78,6 @@ npm run test:browser
 
 浏览器回归使用模拟 Extension Host；IDE 验收步骤见 [手动验收清单](docs/MANUAL_TEST.md)。变更记录见 [CHANGELOG](CHANGELOG.md)。
 
-提交说明使用中文，概括具体变更，例如 `新增全本缓存与取消操作`。
-
 ## 许可证
 
 项目采用 [MIT](LICENSE) 许可证。所用组件及许可文本见 [第三方声明](THIRD_PARTY_NOTICES.md)。
