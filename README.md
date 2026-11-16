@@ -76,7 +76,7 @@ npm run test:browser
 | `npm test` | 运行底层测试，需先构建 |
 | `npm run package` | 构建检查并生成 VSIX |
 
-浏览器回归使用模拟 Extension Host；IDE 验收步骤见 [手动验收清单](docs/MANUAL_TEST.md)。变更记录见 [CHANGELOG](CHANGELOG.md)。
+启动回归加载实际构建的 Extension Host，并模拟 VS Code API；浏览器回归模拟 Host 消息。实际 IDE 验收步骤见 [手动验收清单](docs/MANUAL_TEST.md)。变更记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可证
 

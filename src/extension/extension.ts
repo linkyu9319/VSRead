@@ -19,16 +19,23 @@ let diagnostics: DiagnosticLog | undefined;
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('VSRead');
   context.subscriptions.push(output);
-  const log = diagnostics = new DiagnosticLog(context.logUri.fsPath, { output: line => output.appendLine(line) });
+  const log = diagnostics = new DiagnosticLog(context.logUri?.fsPath ?? path.join(context.globalStorageUri.fsPath, 'logs'), { output: line => output.appendLine(line) });
   log.write('info', 'extension.activate', { version: context.extension.packageJSON.version, ide: vscode.env.appName, ideVersion: vscode.version, node: process.versions.node, transport: 'node-http', proxyConfigured: !!vscode.workspace.getConfiguration('http').get('proxy') });
   const openLogs = async () => {
     await log.flush();
     try { await vscode.window.showTextDocument(vscode.Uri.file(log.filePath), { preview: true }); }
     catch (error) { output.show(); log.write('error', 'diagnostics.open_failed', diagnosticError(error)); }
   };
+  // 先提供原生入口，书库初始化失败时仍能打开日志排查。
+  registerSidebar(context);
+  context.subscriptions.push(vscode.commands.registerCommand('vsread.openLogs', openLogs));
+  log.write('info', 'sidebar.registered', { viewId: 'vsread.library.launcher' });
   const libraryStore = new LibraryStore(context.globalStorageUri.fsPath);
-  await libraryStore.load();
-  store = libraryStore;
+  let libraryError: string | undefined;
+  try { await libraryStore.load(); store = libraryStore; }
+  catch (error) { libraryError = `本地书库暂不可用：${errorMessage(error)}`; log.write('error', 'library.load_failed', diagnosticError(error)); }
+  const requireLibrary = () => { if (libraryError) throw new Error(libraryError); };
+  const localMethods = new Set(['init', 'import', 'open', 'text', 'binary', 'progress', 'settings', 'metadata', 'encoding', 'remove']);
   const library = new BookLibrary(libraryStore, path.join(context.extensionPath, 'dist', 'txtWorker.cjs'));
   const online = new OnlineLibrary(path.join(context.globalStorageUri.fsPath, 'online'), { log: log.write });
   let onlineError: string | undefined;
@@ -47,6 +54,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const openBook = async (id: unknown): Promise<OpenBook> => {
+    requireLibrary();
     const book = library.book(id);
     libraryStore.data.lastBookId = book.id;
     await libraryStore.save();
@@ -54,6 +62,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const importBooks = async (resource?: vscode.Uri) => {
+    requireLibrary();
     if (importing) throw new Error('正在导入，请稍候');
     // 资源管理器会传 URI；侧栏标题菜单可能传视图上下文，应走文件选择器。
     const selected = resource instanceof vscode.Uri ? [resource] : await vscode.window.showOpenDialog({
@@ -99,6 +108,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (traced) log.write('info', 'rpc.start', { method: request.method, requestId: request.id });
       try {
         const args = isRecord(request.args) ? request.args : {};
+        // 加载失败时禁止用默认空书库覆盖原始文件。
+        if (localMethods.has(request.method)) requireLibrary();
         // 在线数据损坏只影响在线功能，本地文件阅读仍可正常使用。
         if (onlineError && (request.method.startsWith('sources.') || request.method.startsWith('online.'))) throw new Error(onlineError);
         let result: unknown;
@@ -199,7 +210,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   context.subscriptions.push(
     vscode.commands.registerCommand('vsread.open', async () => { requestedView = undefined; await show(); }),
-    vscode.commands.registerCommand('vsread.openLogs', openLogs),
     vscode.commands.registerCommand('vsread.toggleFocusMode', async () => {
       if (panel) await panel.webview.postMessage({ event: 'focus', enabled: !focusMode });
       else { requestedFocus = true; setPanelFocus(await show(), true); }
@@ -227,7 +237,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.window.registerWebviewPanelSerializer('vsread.reader', { deserializeWebviewPanel: async target => { await configure(target); } }),
   );
-  registerSidebar(context);
+  log.write('info', 'extension.ready', { localLibrary: !libraryError, onlineLibrary: !onlineError });
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
