@@ -1,7 +1,10 @@
 import { build, context } from 'esbuild';
 import { build as viteBuild } from 'vite';
-import { cp, mkdir } from 'node:fs/promises';
+import { cp, mkdir, readFile } from 'node:fs/promises';
+import { validateManifest } from './validate-manifest.mjs';
 import './licenses.mjs';
+
+validateManifest(JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')));
 
 const options = {
   entryPoints: { extension: 'src/extension/extension.ts', txtWorker: 'src/extension/txtWorker.ts' },

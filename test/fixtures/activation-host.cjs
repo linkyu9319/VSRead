@@ -10,7 +10,11 @@ async function main() {
   const scenario = process.argv[2];
   assert(['view', 'command', 'damaged-local', 'damaged-online'].includes(scenario));
   const repository = path.resolve(__dirname, '..', '..');
-  const manifest = JSON.parse(await fs.readFile(path.join(repository, 'package.json'), 'utf8'));
+  const extensionRoot = process.argv[3] ? path.resolve(process.argv[3]) : repository;
+  const manifest = JSON.parse(await fs.readFile(path.join(extensionRoot, 'package.json'), 'utf8'));
+  const { validateManifest } = await import(pathToFileURL(path.join(repository, 'scripts', 'validate-manifest.mjs')).href);
+  // 先经过清单校验，再模拟原生激活，不能跳过 IDE 会拒绝的视图贡献。
+  validateManifest(manifest);
   const views = Object.values(manifest.contributes.views).flat();
   const expectedView = views.find(view => view.id.startsWith('vsread.'))?.id;
   assert(expectedView, 'manifest 必须声明阅读入口');
@@ -101,7 +105,7 @@ async function main() {
     },
   };
   const context = {
-    subscriptions: [], extensionPath: repository, extensionUri: Uri.file(repository),
+    subscriptions: [], extensionPath: extensionRoot, extensionUri: Uri.file(extensionRoot),
     globalStorageUri: Uri.file(storage), logUri: Uri.file(logs), extension: { packageJSON: manifest },
     secrets: { get: async () => undefined, store: async () => {}, delete: async () => {} },
     globalState: { get: (_key, fallback) => fallback, update: async () => {} },
@@ -110,7 +114,7 @@ async function main() {
   let extension;
   try {
     Module._load = function (request, parent, isMain) { return request === 'vscode' ? vscode : originalLoad.call(this, request, parent, isMain); };
-    extension = require(path.join(repository, 'dist', 'extension.cjs'));
+    extension = require(path.join(extensionRoot, 'dist', 'extension.cjs'));
     const activating = extension.activate(context);
     // 无论磁盘加载成功与否，入口与诊断必须在 activate 的首个 await 之前可用。
     assert.equal(trees.length, 1, '数据加载前尚未注册侧栏，冷启动会显示无provider');
