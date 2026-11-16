@@ -20,7 +20,8 @@ export function registerSidebar(context: vscode.ExtensionContext): void {
     getTreeItem: item => item,
     getChildren: item => item ? [] : entries,
   };
-  const view = vscode.window.createTreeView('vsread.launcher', { treeDataProvider: provider, showCollapseAll: false });
+  // 独立入口 ID 避免旧版 IDE 占位图标仍指向 0.1.3 的缓存资源。
+  const view = vscode.window.createTreeView('vsread.library.launcher', { treeDataProvider: provider, showCollapseAll: false });
   view.message = '青菜阅读 · EPUB / TXT / PDF';
   context.subscriptions.push(view);
 }

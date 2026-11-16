@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { ReaderSettings } from '../../shared/model';
-import type { OnlineBookRecord, OnlineChapterContent } from '../../shared/online';
+import type { CacheAllJob, OnlineBookRecord, OnlineChapterContent } from '../../shared/online';
 import { formatPercentage } from '../../shared/format';
 import { request } from '../bridge';
 import { OnlineProgressWriter, type ChapterPosition } from '../onlineProgress';
 import { Icon } from './Icon';
+import { CacheAllControls } from './CacheAllControls';
 
 interface Props {
   book: OnlineBookRecord; settings: ReaderSettings; sourceName: string;
@@ -28,6 +29,8 @@ export function OnlineReader(props: Props) {
   const [tocVisible, setTocVisible] = useState(true);
   const [filter, setFilter] = useState('');
   const [cacheCount, setCacheCount] = useState(5);
+  const [cacheAllBusy, setCacheAllBusy] = useState(true);
+  const [cacheRefresh, setCacheRefresh] = useState(0);
   const [position, setPosition] = useState<ChapterPosition>({ chapter: chapterIndex, scroll: props.book.progress?.scroll ?? 0 });
   const viewport = useRef<HTMLDivElement>(null);
   const bookRef = useRef(book);
@@ -195,6 +198,11 @@ export function OnlineReader(props: Props) {
     setBook(updated);
     latest.current.onBookChange(updated);
   };
+  const applyCacheStatus = (status: CacheAllJob) => {
+    // 轮询快照可能早于刚读完的一章；缓存只增不减，清理动作会主动触发新查询。
+    const cachedChapters = [...new Set([...bookRef.current.cachedChapters, ...status.cachedChapters])].sort((a, b) => a - b);
+    if (cachedChapters.length !== bookRef.current.cachedChapters.length) synchronizeBook({ ...bookRef.current, cachedChapters });
+  };
   const perform = async (name: string, action: () => Promise<void>) => {
     if (task) return;
     capture();
@@ -206,7 +214,7 @@ export function OnlineReader(props: Props) {
     finally { if (active.current) setTask(''); }
   };
   const refreshToc = () => {
-    if (task || loading) return;
+    if (task || loading || cacheAllBusy) return;
     capture();
     // 刷新可能改变章节顺序；请求期间不再发送旧目录索引的进度。
     readable.current = false;
@@ -233,15 +241,15 @@ export function OnlineReader(props: Props) {
 
   return <section className="online-reader" aria-label="在线阅读器">
     <div className="online-reader-heading"><button className="text-button" onClick={() => { capture(); void writer.current!.flush(); props.onBack(); }}><Icon name="left" size={16} />返回书架</button><div><h2>{book.title}</h2><span>{book.author || props.sourceName}</span></div><span className="online-tag">{props.sourceName}</span></div>
-    <div className="online-reader-tools"><button className={`text-button ${tocVisible ? 'active' : ''}`} onClick={() => setTocVisible(!tocVisible)} aria-label="切换在线目录" aria-expanded={tocVisible}><Icon name="menu" size={16} />目录</button><button className="text-button" disabled={!!task || loading} onClick={refreshToc}>刷新目录</button><button className="text-button" disabled={!!task || loading || !content} onClick={() => void loadChapter(chapterIndex, lastPosition.current.scroll, true)}>刷新本章</button><span className="online-reader-cache">已缓存 {book.cachedChapters.length} / {book.chapters.length} 章</span></div>
-    <div className="online-cache-controls"><label>从当前章起缓存 <input aria-label="缓存章节数" type="number" min="1" max="20" value={cacheCount} onChange={event => setCacheCount(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} /> 章</label><button className="text-button" disabled={!!task || !book.chapters.length} onClick={() => void perform('缓存章节', async () => {
+    <div className="online-reader-tools"><button className={`text-button ${tocVisible ? 'active' : ''}`} onClick={() => setTocVisible(!tocVisible)} aria-label="切换在线目录" aria-expanded={tocVisible}><Icon name="menu" size={16} />目录</button><button className="text-button" disabled={!!task || loading || cacheAllBusy} onClick={refreshToc}>刷新目录</button><button className="text-button" disabled={!!task || loading || !content || cacheAllBusy} onClick={() => void loadChapter(chapterIndex, lastPosition.current.scroll, true)}>刷新本章</button><span className="online-reader-cache">已缓存 {book.cachedChapters.length} / {book.chapters.length} 章</span></div>
+    <div className="online-cache-controls"><label>从当前章起缓存 <input aria-label="缓存章节数" type="number" min="1" max="20" disabled={cacheAllBusy || !!task} value={cacheCount} onChange={event => setCacheCount(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} /> 章</label><button className="text-button" disabled={!!task || cacheAllBusy || !book.chapters.length} onClick={() => void perform('缓存章节', async () => {
       const result = await request('online.cache', { id: book.id, from: shownChapter.current, count: cacheCount });
       const next = await request('online.open', { id: book.id });
-      if (active.current) { synchronizeBook(next); setMessage(`缓存完成：成功 ${result.cached} 章，失败 ${result.failed} 章`); }
-    })}>{task === '缓存章节' ? '正在缓存…' : '缓存章节'}</button><button className="text-button" disabled={!!task || !book.cachedChapters.length} onClick={() => void perform('清除缓存', async () => {
+      if (active.current) { synchronizeBook(next); setCacheRefresh(value => value + 1); setMessage(`缓存完成：成功 ${result.cached} 章，失败 ${result.failed} 章`); }
+    })}>{task === '缓存章节' ? '正在缓存…' : '缓存章节'}</button><button className="text-button" disabled={!!task || cacheAllBusy || !book.cachedChapters.length} onClick={() => void perform('清除缓存', async () => {
       const next = await request('online.clearCache', { id: book.id });
-      if (active.current) { synchronizeBook(next); setMessage('离线缓存已清除，当前已显示章节仍可阅读'); }
-    })}>清除缓存</button>{task && <span className="online-inline-status" role="status">{task}中…</span>}</div>
+      if (active.current) { synchronizeBook(next); setCacheRefresh(value => value + 1); setMessage('离线缓存已清除，当前已显示章节仍可阅读'); }
+    })}>清除缓存</button>{task && <span className="online-inline-status" role="status">{task}中…</span>}<CacheAllControls book={book} busy={!!task} refreshVersion={cacheRefresh} onStatus={applyCacheStatus} onBusyChange={setCacheAllBusy} onError={props.onError} /></div>
     {message && <p className="online-message" role="status">{message}{!content && !loading && <button className="text-button" onClick={() => void loadChapter(targetChapter.current, restore.current)}>重试</button>}</p>}
     <div className="online-reader-body">{tocVisible && <aside className="online-toc" aria-label="在线章节目录"><div className="filter-field"><Icon name="search" size={15} /><input aria-label="筛选在线章节" placeholder="查找章节…" value={filter} onChange={event => setFilter(event.target.value)} /></div><nav>{book.chapters.map((chapter, index) => ({ chapter, index })).filter(({ chapter }) => chapter.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase())).map(({ chapter, index }) => <button key={chapter.id} className={index === chapterIndex && content ? 'active' : ''} onClick={() => void loadChapter(index)} title={chapter.title}><span>{chapter.title}</span>{book.cachedChapters.includes(index) && <Icon name="check" size={12} />}</button>)}</nav></aside>}
       <div className="online-reading-stage"><div key={content?.chapter.id ?? 'empty'} ref={viewport} className="online-reading-surface" style={{ overflowAnchor: 'none' }} tabIndex={0} aria-label="在线章节正文" onScroll={capture} data-testid="online-reading-surface">{content && <article className="online-chapter-content" style={textStyle}><h3>{content.chapter.title}</h3><div>{content.text}</div></article>}</div>{loading && <div className={`online-loading ${content ? 'online-loading-small' : ''}`} role="status"><span className="spinner" />正在读取章节…</div>}{!loading && !content && <div className="online-no-content"><Icon name="book" size={30} /><p>选择章节开始阅读</p></div>}</div>

@@ -23,6 +23,13 @@ export interface OnlineBookRecord {
   cachedChapters: number[];
 }
 export interface OnlineChapterContent { chapter: OnlineChapter; text: string; cached: boolean }
+export interface CacheAllJob {
+  bookId: string;
+  state: 'idle' | 'running' | 'cancelling' | 'completed' | 'cancelled' | 'failed';
+  total: number; completed: number; failed: number;
+  currentChapter?: number; error?: string;
+  cachedChapters: number[];
+}
 export interface OnlineState { sources: BookSource[]; books: OnlineBookRecord[] }
 
 export interface UpdateStatus {
@@ -44,6 +51,9 @@ export interface OnlineRequests {
   'online.chapter': { args: { id: string; chapter: number; refresh?: boolean }; result: OnlineChapterContent };
   'online.progress': { args: { id: string; chapter: number; scroll: number }; result: void };
   'online.cache': { args: { id: string; from: number; count: number }; result: { cached: number; failed: number } };
+  'online.cacheAll.start': { args: { id: string }; result: CacheAllJob };
+  'online.cacheAll.status': { args: { id: string }; result: CacheAllJob };
+  'online.cacheAll.cancel': { args: { id: string }; result: CacheAllJob };
   'online.clearCache': { args: { id: string }; result: OnlineBookRecord };
   'online.remove': { args: { id: string }; result: OnlineBookRecord[] };
   'updates.check': { args: undefined; result: UpdateStatus };

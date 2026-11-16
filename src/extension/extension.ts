@@ -95,7 +95,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!isRecord(message) || typeof message.id !== 'string' || message.id.length > 100 || typeof message.method !== 'string') return;
       const request = message as unknown as RpcRequest;
       const started = Date.now();
-      const traced = /^(online\.(search|add|open|chapter|cache)|sources\.(import|builtin\.add))$/.test(request.method);
+      const traced = /^(online\.(search|add|open|chapter|cache|cacheAll\.(start|cancel))|sources\.(import|builtin\.add))$/.test(request.method);
       if (traced) log.write('info', 'rpc.start', { method: request.method, requestId: request.id });
       try {
         const args = isRecord(request.args) ? request.args : {};
@@ -167,6 +167,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           case 'online.chapter': result = await online.chapter(requiredString(args.id), args.chapter as number, args.refresh === true); break;
           case 'online.progress': await online.saveProgress(requiredString(args.id), args.chapter as number, args.scroll as number); break;
           case 'online.cache': result = await online.cacheChapters(requiredString(args.id), args.from as number, args.count as number); break;
+          case 'online.cacheAll.start': result = await online.startCacheAll(requiredString(args.id)); break;
+          case 'online.cacheAll.status': result = online.cacheAllStatus(requiredString(args.id)); break;
+          case 'online.cacheAll.cancel': result = online.cancelCacheAll(requiredString(args.id)); break;
           case 'online.clearCache': result = await online.clearCache(requiredString(args.id)); break;
           case 'online.remove': result = await online.removeBook(requiredString(args.id)); break;
           case 'updates.check': result = await updates.check(); break;
@@ -230,4 +233,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function requiredString(value: unknown): string { if (typeof value !== 'string' || !value.trim()) throw new Error('请求参数无效'); return value; }
 function optionalString(value: unknown): string | undefined { if (value === undefined) return undefined; return requiredString(value); }
-export async function deactivate(): Promise<void> { await Promise.all([store?.flush(), onlineStore?.flush()]); await diagnostics?.flush(); }
+export async function deactivate(): Promise<void> {
+  onlineStore?.cancelAllCacheJobs();
+  await Promise.all([store?.flush(), onlineStore?.flush()]);
+  await diagnostics?.flush();
+}

@@ -13,6 +13,31 @@ async function mockOnlineHost(page: Page) {
     const settings = { theme: 'light', fontSize: 19, lineHeight: 1.9, fontFamily: 'serif', flow: 'scrolled', zoom: 1, backgroundColor: '#faf8f2', textColor: '#302e2a' };
     const state = JSON.parse(localStorage.getItem('online-fixture') ?? '{"sources":[],"books":[]}');
     const localBooks = JSON.parse(localStorage.getItem('local-fixture') ?? '[]');
+    const jobs = (state.cacheJobs ??= {});
+    const snapshot = (book: any) => {
+      const job = jobs[book.id] ?? { state: 'idle', failed: 0 };
+      return { bookId: book.id, state: job.state, total: book.chapters.length, completed: book.cachedChapters.length, failed: job.failed, currentChapter: job.currentChapter, error: job.error, cachedChapters: [...book.cachedChapters] };
+    };
+    (window as any).__advanceCacheAll = (options: { fail?: boolean; limit?: boolean } = {}) => {
+      const book = state.books[0], job = book && jobs[book.id];
+      if (!job) throw new Error('没有缓存任务');
+      if (job.state === 'cancelling') job.state = 'cancelled';
+      else if (job.state === 'running') {
+        if (options.limit) { job.state = 'failed'; job.error = '离线缓存已达到体积上限，请先清理不需要的缓存'; }
+        else {
+          const index = job.currentChapter;
+          if (options.fail) job.failed++;
+          else if (!book.cachedChapters.includes(index)) book.cachedChapters.push(index);
+          let next = index + 1;
+          while (next < book.chapters.length && book.cachedChapters.includes(next)) next++;
+          if (next >= book.chapters.length) {
+            job.state = 'completed'; job.currentChapter = undefined;
+            job.error = job.failed ? `仍有 ${job.failed} 章未缓存，可继续缓存` : undefined;
+          } else job.currentChapter = next;
+        }
+      }
+      localStorage.setItem('online-fixture', JSON.stringify(state));
+    };
     (window as any).__onlineRpc = [];
     window.acquireVsCodeApi = () => ({
       getState: () => JSON.parse(localStorage.getItem('fixture-view') ?? '{}'), setState: value => localStorage.setItem('fixture-view', JSON.stringify(value)),
@@ -66,6 +91,7 @@ async function mockOnlineHost(page: Page) {
             }
             case 'online.progress': book.progress = { chapter: args.chapter, scroll: args.scroll, updatedAt: new Date().toISOString() }; break;
             case 'online.cache': {
+              if (['running', 'cancelling'].includes(jobs[book.id]?.state)) throw new Error('请先取消全本缓存');
               let cached = 0, failed = 0;
               for (let index = args.from; index < Math.min(book.chapters.length, args.from + args.count); index++) {
                 if ((window as any).__offline && !book.cachedChapters.includes(index)) { failed++; continue; }
@@ -74,7 +100,15 @@ async function mockOnlineHost(page: Page) {
               }
               result = { cached, failed }; break;
             }
-            case 'online.clearCache': book.cachedChapters = []; result = book; break;
+            case 'online.cacheAll.status': result = snapshot(book); break;
+            case 'online.cacheAll.start': {
+              let index = 0;
+              while (index < book.chapters.length && book.cachedChapters.includes(index)) index++;
+              jobs[book.id] = { state: index >= book.chapters.length ? 'completed' : 'running', failed: 0, currentChapter: index >= book.chapters.length ? undefined : index };
+              result = snapshot(book); break;
+            }
+            case 'online.cacheAll.cancel': if (jobs[book.id]?.state === 'running') jobs[book.id].state = 'cancelling'; result = snapshot(book); break;
+            case 'online.clearCache': delete jobs[book.id]; book.cachedChapters = []; result = book; break;
             case 'online.remove': state.books = state.books.filter((item: any) => item.id !== args.id); result = state.books; break;
             case 'updates.check': result = { state: 'available', currentVersion: '0.1.2', latestVersion: '0.2.0', releaseUrl: 'https://github.com/linkyu9319/VSRead/releases/tag/v0.2.0', message: '发现新版本 0.2.0' }; break;
             case 'updates.open': (window as any).__releaseOpened = true; break;
@@ -166,10 +200,10 @@ test('配置链接导入与版本检查入口', async ({ page }) => {
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
-async function openSavedOnlineBook(page: Page, chapter = 0, scroll = 0) {
+async function openSavedOnlineBook(page: Page, chapter = 0, scroll = 0, cachedChapters = [0, 1, 2]) {
   const book = {
     id: 'f'.repeat(64), sourceId: source.id, title: '星海在线', author: '测试作者', url: 'https://fiction.example/book/one',
-    addedAt: '2026-11-13T00:00:00.000Z', cachedChapters: [0, 1, 2],
+    addedAt: '2026-11-13T00:00:00.000Z', cachedChapters,
     chapters: ['第一章 星海', '第二章 远航', '第三章 归途'].map((title, index) => ({ id: String(index + 1).repeat(64), title, url: `https://fiction.example/chapter/${index + 1}` })),
     progress: { chapter, scroll, updatedAt: '2026-11-13T00:00:00.000Z' },
   };
@@ -313,4 +347,72 @@ test('书源报错可从错误提示直接打开本地诊断日志', async ({ pa
   await expect(page.getByRole('alert')).toContainText('网络请求超时');
   await page.getByRole('alert').getByRole('button', { name: '查看日志', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__logsOpened)).toBe(true);
+});
+
+test('全本缓存实时显示进度，离开阅读器继续下载，重开保留阅读位置', async ({ page }) => {
+  await openSavedOnlineBook(page, 0, .2, [0]);
+  const controls = page.getByLabel('全本缓存', { exact: true });
+  await controls.getByRole('button', { name: '缓存全本', exact: true }).click();
+  await expect(controls.getByRole('button', { name: '取消缓存', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '缓存章节', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '清除缓存', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '刷新目录', exact: true })).toBeDisabled();
+  await page.evaluate(() => (window as any).__advanceCacheAll());
+  await expect(controls).toContainText('已缓存 2 / 3 章');
+  await page.getByRole('button', { name: '下一章', exact: true }).click();
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第二章 远航');
+  const surface = page.getByTestId('online-reading-surface');
+  await surface.evaluate(node => { node.scrollTop = 420; node.dispatchEvent(new Event('scroll')); });
+  await expect(page.locator('.online-reader .page-controls')).toContainText('进度已保存');
+  await page.getByRole('region', { name: '在线阅读器', exact: true }).getByRole('button', { name: '返回书架', exact: true }).click();
+  await expect(page.getByRole('region', { name: '我的书架', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__onlineRpc.filter((item: any) => item.method === 'online.cacheAll.cancel').length)).toBe(0);
+  await page.evaluate(() => (window as any).__advanceCacheAll());
+  await page.getByRole('button', { name: '阅读 星海在线', exact: true }).click();
+  await expect(controls).toContainText('已缓存 3 / 3 章');
+  await expect(controls).toContainText('全本已缓存，可离线阅读');
+  await expect(controls.getByRole('button', { name: '全本已缓存', exact: true })).toBeDisabled();
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第二章 远航');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeGreaterThan(380);
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeLessThan(460);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('全本缓存可取消、保留已下载章节，并继续重试失败章节', async ({ page }) => {
+  await openSavedOnlineBook(page, 0, .3, [0]);
+  const controls = page.getByLabel('全本缓存', { exact: true });
+  await controls.getByRole('button', { name: '缓存全本', exact: true }).click();
+  await controls.getByRole('button', { name: '取消缓存', exact: true }).click();
+  await expect(controls).toContainText('正在停止缓存');
+  await page.evaluate(() => (window as any).__advanceCacheAll());
+  await expect(controls).toContainText('缓存已取消，已下载章节保留');
+  await expect(controls).toContainText('已缓存 1 / 3 章');
+  await controls.getByRole('button', { name: '继续缓存', exact: true }).click();
+  await page.evaluate(() => (window as any).__advanceCacheAll({ fail: true }));
+  await page.evaluate(() => (window as any).__advanceCacheAll());
+  await expect(controls).toContainText('本轮失败 1 章');
+  await expect(controls).toContainText('仍有 1 章未缓存，可继续缓存');
+  await expect(controls).toContainText('已缓存 2 / 3 章');
+  await controls.getByRole('button', { name: '继续缓存', exact: true }).click();
+  await page.evaluate(() => (window as any).__advanceCacheAll());
+  await expect(controls).toContainText('全本已缓存，可离线阅读');
+  await expect(controls).toContainText('已缓存 3 / 3 章');
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第一章 星海');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('全本缓存达到限额会暂停并提示清理，清理后可重新缓存', async ({ page }) => {
+  await openSavedOnlineBook(page, 1, .4, [1]);
+  const controls = page.getByLabel('全本缓存', { exact: true });
+  await controls.getByRole('button', { name: '缓存全本', exact: true }).click();
+  await page.evaluate(() => (window as any).__advanceCacheAll({ limit: true }));
+  await expect(controls).toContainText('缓存已暂停');
+  await expect(controls).toContainText('离线缓存已达到体积上限，请先清理不需要的缓存');
+  await expect(controls.getByRole('button', { name: '继续缓存', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: '清除缓存', exact: true }).click();
+  await expect(controls).toContainText('已缓存 0 / 3 章');
+  await expect(controls.getByRole('button', { name: '缓存全本', exact: true })).toBeEnabled();
+  await expect(page.locator('.online-chapter-content h3')).toHaveText('第二章 远航');
+  await expect.poll(() => page.getByTestId('online-reading-surface').evaluate(node => node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight))).toBeGreaterThan(.395);
+  await expect(page.getByRole('alert')).toHaveCount(0);
 });

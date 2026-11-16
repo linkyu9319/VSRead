@@ -4,13 +4,13 @@ VSRead 提供手动版本检查和 GitHub 发布页面入口。更新检查读�
 
 ## 使用
 
-在阅读器的版本检查入口点击“检查更新”。发现新版本后，打开发布页面，下载发布者提供的 VSIX，通过 IDE 的“从 VSIX 安装…”完成升级。
+在阅读器的版本检查入口点击“检查更新”。发现新版本后，打开 [GitHub Releases](https://github.com/linkyu9319/VSRead/releases/latest)，下载发布者提供的 VSIX，通过 IDE 的“从 VSIX 安装…”完成升级。公开仓库的发布信息无需配置 GitHub 令牌。
 
 版本检查不会自动安装扩展，也不会创建 GitHub Release。仓库尚未发布正式版本时会显示相应提示。
 
 ## 私有仓库
 
-当前仓库为私有。访问私有发布信息时，可在版本检查入口配置 GitHub 个人访问令牌。令牌需要该仓库的 **Contents: Read** 权限，保存在当前 IDE 的 SecretStorage 中；Webview、书库 JSON 和项目文件不会接收或保存令牌。
+如果使用私有仓库部署的版本，可在版本检查入口配置 GitHub 个人访问令牌。令牌需要该仓库的 **Contents: Read** 权限，保存在当前 IDE 的 SecretStorage 中；Webview、书库 JSON 和项目文件不会接收或保存令牌。
 
 “清除令牌”会移除当前 IDE 保存的令牌。浏览器打开私有 Release 页面时，仍需登录有权访问该仓库的 GitHub 账号。
 

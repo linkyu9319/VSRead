@@ -1,6 +1,6 @@
 import path from 'node:path';
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import type { BookSource, BuiltinSourceSummary, OnlineBookRecord, OnlineChapter, OnlineChapterContent, OnlineSearchResult, SourceImportResult } from '../../shared/online';
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import type { BookSource, BuiltinSourceSummary, CacheAllJob, OnlineBookRecord, OnlineChapter, OnlineChapterContent, OnlineSearchResult, SourceImportResult } from '../../shared/online';
 import { boundedNumber, isRecord } from '../../shared/validation';
 import { requestText, type TextFetcher, type TextResponse } from './network';
 import { normalizeSource, resolveSourceUrl, stableId } from './rules';
@@ -10,6 +10,10 @@ import { diagnosticError, diagnosticUrl, type DiagnosticSink } from '../diagnost
 
 interface StoredBook extends OnlineBookRecord { cacheSizes: Record<string, number> }
 interface State { version: 1; sources: BookSource[]; books: StoredBook[] }
+interface CacheAllTask {
+  state: CacheAllJob['state']; cancelRequested: boolean; failedIds: Set<string>;
+  currentChapter?: number; error?: string; done: Promise<void>; wake?(): void;
+}
 const MAX_CACHE_BYTES = 200 * 1024 * 1024;
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -23,8 +27,14 @@ export class OnlineLibrary {
   private bookOperations = new Map<string, Promise<unknown>>();
   private cacheWrites = Promise.resolve();
   private sourceOperations = Promise.resolve();
+  private cacheAllTasks = new Map<string, CacheAllTask>();
+  private cacheMaintenance = new Map<string, number>();
+  private cacheAllDelayMs: number;
   private log?: DiagnosticSink;
-  constructor(readonly root: string, options: { fetchText?: TextFetcher; log?: DiagnosticSink } = {}) { this.fetchText = options.fetchText ?? requestText; this.log = options.log; }
+  constructor(readonly root: string, options: { fetchText?: TextFetcher; log?: DiagnosticSink; cacheAllDelayMs?: number } = {}) {
+    this.fetchText = options.fetchText ?? requestText; this.log = options.log;
+    this.cacheAllDelayMs = Math.max(0, Math.min(2000, options.cacheAllDelayMs ?? 200));
+  }
 
   async load(): Promise<void> {
     await mkdir(path.join(this.root, 'cache'), { recursive: true });
@@ -140,7 +150,9 @@ export class OnlineLibrary {
     });
   }
   async open(id: string, refresh = false): Promise<OnlineBookRecord> {
+    if (refresh && this.cacheAllActive(id)) throw new Error('正在缓存全本，请先取消缓存后再刷新目录');
     return this.withBook(id, async () => {
+    if (refresh && this.cacheAllActive(id)) throw new Error('正在缓存全本，请先取消缓存后再刷新目录');
     const book = this.book(id);
     if (refresh || !book.chapters.length) { await this.refreshToc(book, this.source(book.sourceId, true)); await this.save(); }
     return this.publicBook(book);
@@ -157,9 +169,19 @@ export class OnlineLibrary {
     if (!refresh) {
       try {
         const text = await readFile(this.cacheFile(book, chapter), 'utf8');
+        if (!text.trim()) throw Object.assign(new Error('缓存文件为空'), { code: 'VSREAD_EMPTY_CACHE' });
+        const bytes = Buffer.byteLength(text, 'utf8');
+        if (book.cacheSizes[chapter.id] !== bytes) {
+          // 上次中断可能已写好正文但未提交索引；复用文件并补齐元数据，避免重复下载。
+          const repair = this.cacheWrites.then(() => this.persistCacheSize(book, chapter.id, bytes));
+          this.cacheWrites = repair.catch(() => undefined);
+          await repair;
+        }
         return { chapter: clone(chapter), text, cached: true };
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'VSREAD_EMPTY_CACHE') throw error;
+        if (code === 'VSREAD_EMPTY_CACHE') await rm(this.cacheFile(book, chapter), { force: true });
         if (book.cacheSizes[chapter.id] !== undefined) { delete book.cacheSizes[chapter.id]; this.syncCached(book); await this.save(); }
       }
     }
@@ -184,8 +206,108 @@ export class OnlineLibrary {
     }
     return { cached, failed };
   }
+  /** 后台缓存复用逐章落盘流程，页面关闭不取消；重启后再次开始会跳过有效缓存。 */
+  async startCacheAll(id: string): Promise<CacheAllJob> {
+    const book = this.book(id);
+    if (this.cacheMaintenance.has(id)) throw new Error('正在清理或移除这本书，请稍后重试');
+    if (this.cacheAllActive(id)) return this.cacheAllStatus(id);
+    if (!book.chapters.length) throw new Error('目录为空，请先刷新目录');
+    const task: CacheAllTask = { state: 'running', cancelRequested: false, failedIds: new Set(), done: Promise.resolve() };
+    this.cacheAllTasks.set(id, task);
+    this.log?.('info', 'online.cache_all_start', { bookId: id, total: book.chapters.length, cached: book.cachedChapters.length });
+    task.done = this.runCacheAll(id, task);
+    return this.cacheAllStatus(id);
+  }
+  cacheAllStatus(id: string): CacheAllJob {
+    const book = this.book(id);
+    const task = this.cacheAllTasks.get(id);
+    const chapterIds = new Set(book.chapters.map(chapter => chapter.id));
+    const failed = task ? [...task.failedIds].filter(chapterId => book.cacheSizes[chapterId] === undefined && chapterIds.has(chapterId)).length : 0;
+    return { bookId: id, state: task?.state ?? 'idle', total: book.chapters.length, completed: book.cachedChapters.length, failed, currentChapter: task?.currentChapter, error: task?.error, cachedChapters: [...book.cachedChapters] };
+  }
+  cancelCacheAll(id: string): CacheAllJob {
+    this.book(id);
+    const task = this.cacheAllTasks.get(id);
+    if (task && this.cacheAllActive(id)) { task.cancelRequested = true; task.state = 'cancelling'; task.wake?.(); }
+    return this.cacheAllStatus(id);
+  }
+  /** IDE 退出只请求停止后续下载，不等待当前网络请求结束。 */
+  cancelAllCacheJobs(): void {
+    for (const task of this.cacheAllTasks.values()) {
+      if (task.state !== 'running' && task.state !== 'cancelling') continue;
+      task.cancelRequested = true; task.state = 'cancelling'; task.wake?.();
+    }
+  }
+  private cacheAllActive(id: string): boolean { const state = this.cacheAllTasks.get(id)?.state; return state === 'running' || state === 'cancelling'; }
+  private async runCacheAll(id: string, task: CacheAllTask): Promise<void> {
+    const book = this.book(id);
+    let consecutiveFailures = 0;
+    try {
+      for (let index = 0; index < book.chapters.length && !task.cancelRequested; index++) {
+        const chapter = book.chapters[index];
+        task.currentChapter = index;
+        try {
+          const downloaded = await this.cacheAllChapter(id, index, task);
+          task.failedIds.delete(chapter.id); consecutiveFailures = 0;
+          if (!downloaded) continue;
+        } catch (error) {
+          task.failedIds.add(chapter.id); consecutiveFailures++;
+          const code = diagnosticError(error).errorCode;
+          const source = this.state.sources.find(source => source.id === book.sourceId);
+          const fatalCodes = ['VSREAD_CACHE_LIMIT', 'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'ENOSPC', 'EACCES', 'EPERM', 'EISDIR', 'EROFS', 'HTTP_401', 'HTTP_403', 'HTTP_429'];
+          if (!source?.enabled || (code && fatalCodes.includes(code)) || consecutiveFailures >= 3) throw error;
+        }
+        if (!task.cancelRequested && index < book.chapters.length - 1 && this.cacheAllDelayMs) await this.cacheAllPause(task);
+      }
+      task.state = task.cancelRequested ? 'cancelled' : 'completed';
+      const failed = this.cacheAllStatus(id).failed;
+      if (failed) task.error = `仍有 ${failed} 章未缓存，可点击继续缓存重试`;
+    } catch (error) {
+      task.state = task.cancelRequested ? 'cancelled' : 'failed';
+      task.error = error instanceof Error ? error.message : String(error);
+    } finally {
+      task.currentChapter = undefined; task.wake = undefined;
+      this.log?.(task.state === 'failed' ? 'warn' : 'info', 'online.cache_all_end', { bookId: id, state: task.state, cached: book.cachedChapters.length, failed: task.failedIds.size });
+    }
+  }
+  private cacheAllChapter(id: string, index: number, task: CacheAllTask): Promise<boolean> {
+    return this.withBook(id, async () => {
+      if (task.cancelRequested) return false;
+      const book = this.book(id), chapter = book.chapters[index];
+      const expectedSize = book.cacheSizes[chapter.id];
+      if (expectedSize !== undefined) {
+        try {
+          const file = await stat(this.cacheFile(book, chapter));
+          if (file.isFile() && file.size > 0 && file.size === expectedSize) return false;
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        // 校验和修复也纳入书籍锁，避免与用户刷新当前章交错、误删刚写好的缓存。
+        await rm(this.cacheFile(book, chapter), { force: true });
+        delete book.cacheSizes[chapter.id]; this.syncCached(book); await this.save();
+      }
+      if (task.cancelRequested) return false;
+      this.source(book.sourceId, true);
+      const content = await this.chapterData(id, index, false);
+      return !content.cached;
+    });
+  }
+  private cacheAllPause(task: CacheAllTask): Promise<void> {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { task.wake = undefined; resolve(); }, this.cacheAllDelayMs);
+      task.wake = () => { clearTimeout(timer); task.wake = undefined; resolve(); };
+    });
+  }
+  private async stopCacheAll(id: string): Promise<void> {
+    const task = this.cacheAllTasks.get(id);
+    if (task && this.cacheAllActive(id)) { this.cancelCacheAll(id); await task.done; }
+  }
+  private async withCacheMaintenance<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    this.book(id);
+    this.cacheMaintenance.set(id, (this.cacheMaintenance.get(id) ?? 0) + 1);
+    try { await this.stopCacheAll(id); return await operation(); }
+    finally { const remaining = (this.cacheMaintenance.get(id) ?? 1) - 1; if (remaining) this.cacheMaintenance.set(id, remaining); else this.cacheMaintenance.delete(id); }
+  }
   async clearCache(id: string): Promise<OnlineBookRecord> {
-    return this.withBook(id, () => this.clearBookCache(id));
+    return this.withCacheMaintenance(id, () => this.withBook(id, async () => { const book = await this.clearBookCache(id); this.cacheAllTasks.delete(id); return book; }));
   }
   private async clearBookCache(id: string): Promise<OnlineBookRecord> {
     const book = this.book(id);
@@ -196,7 +318,7 @@ export class OnlineLibrary {
     return this.publicBook(book);
   }
   async removeBook(id: string): Promise<OnlineBookRecord[]> {
-    return this.withBook(id, async () => {
+    return this.withCacheMaintenance(id, () => this.withBook(id, async () => {
       const book = this.book(id);
       const index = this.state.books.indexOf(book);
       this.state.books.splice(index, 1);
@@ -207,8 +329,9 @@ export class OnlineLibrary {
         throw error;
       }
       await rm(path.join(this.root, 'cache', book.id), { recursive: true, force: true });
+      this.cacheAllTasks.delete(id);
       return this.listBooks();
-    });
+    }));
   }
   flush(): Promise<void> { return Promise.all([this.sourceOperations, this.writes]).then(() => undefined); }
 
@@ -333,18 +456,26 @@ export class OnlineLibrary {
     const oldSize = book.cacheSizes[chapter.id] ?? 0;
     const bookSize = Object.values(book.cacheSizes).reduce((sum, value) => sum + value, 0) - oldSize + bytes;
     const total = this.state.books.reduce((sum, item) => sum + Object.values(item.cacheSizes).reduce((a, b) => a + b, 0), 0) - oldSize + bytes;
-    if (bookSize > 100 * 1024 * 1024 || total > MAX_CACHE_BYTES) throw new Error('离线缓存已达到体积上限，请先清理不需要的缓存');
+    if (bookSize > 100 * 1024 * 1024 || total > MAX_CACHE_BYTES) throw Object.assign(new Error('离线缓存已达到体积上限，请先清理不需要的缓存后继续'), { code: 'VSREAD_CACHE_LIMIT' });
     const filename = this.cacheFile(book, chapter);
     await mkdir(path.dirname(filename), { recursive: true });
     await writeFile(filename + '.tmp', text, 'utf8');
     await rename(filename + '.tmp', filename);
-    book.cacheSizes[chapter.id] = bytes;
-    this.syncCached(book);
-    await this.save();
+    await this.persistCacheSize(book, chapter.id, bytes);
     });
     this.cacheWrites = operation.catch(() => undefined);
     await operation;
     return { chapter: clone(chapter), text, cached: false };
+  }
+  private async persistCacheSize(book: StoredBook, chapterId: string, bytes: number): Promise<void> {
+    const previous = book.cacheSizes[chapterId];
+    book.cacheSizes[chapterId] = bytes; this.syncCached(book);
+    try { await this.save(); }
+    catch (error) {
+      // 正文文件保留供重试，失败索引不能被误判为已经持久化的成功缓存。
+      if (previous === undefined) delete book.cacheSizes[chapterId]; else book.cacheSizes[chapterId] = previous;
+      this.syncCached(book); throw error;
+    }
   }
   private validateBook(value: unknown): StoredBook {
     if (!isRecord(value) || typeof value.id !== 'string' || !/^[a-f0-9]{64}$/.test(value.id) || typeof value.sourceId !== 'string' || typeof value.title !== 'string' || typeof value.url !== 'string' || !Array.isArray(value.chapters) || value.chapters.length > 20_000) throw new Error('在线书籍记录无效');
