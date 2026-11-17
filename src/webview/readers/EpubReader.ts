@@ -6,6 +6,7 @@ import { readBookBytes } from './bookBytes';
 import { estimateEpubProgress, type EpubLocation } from './epubProgress';
 import { progress, readingColors, type ReaderAdapter, type ReaderEvents } from './types';
 import { resetReadingScroll, scrollReadingSurface, stopReadingScroll } from './readerScroll';
+import { focusReadingSurface } from './readerFocus';
 
 export class EpubReader implements ReaderAdapter {
   private book?: Book;
@@ -91,7 +92,7 @@ export class EpubReader implements ReaderAdapter {
       if (!event.repeat) window.dispatchEvent(new CustomEvent('vsread:exit-focus'));
       return;
     }
-    if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || (event.target as HTMLElement)?.closest('input,select,textarea,[contenteditable]')) return;
+    if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || document.querySelector('[role="dialog"]') || (event.target as HTMLElement)?.closest('input,select,textarea,[contenteditable]')) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); this.scroll(event.key === 'ArrowDown' ? 1 : -1); }
     if (event.key === 'ArrowRight' || event.key === 'PageDown') { event.preventDefault(); void this.next().catch(this.events.error); }
     if (event.key === 'ArrowLeft' || event.key === 'PageUp') { event.preventDefault(); void this.previous().catch(this.events.error); }
@@ -123,6 +124,7 @@ export class EpubReader implements ReaderAdapter {
   private async move(direction: 'next' | 'prev'): Promise<void> {
     const rendition = this.rendition;
     if (this.destroyed || !this.ready || !rendition || this.moving) return;
+    focusReadingSurface(this.container);
     this.moving = true;
     clearTimeout(this.scrollTimer);
     stopReadingScroll(this.viewport());
@@ -145,6 +147,7 @@ export class EpubReader implements ReaderAdapter {
   async previous(): Promise<void> { await this.move('prev'); }
   async goTo(target: string): Promise<void> {
     if (!this.destroyed) {
+      focusReadingSurface(this.container);
       clearTimeout(this.scrollTimer);
       stopReadingScroll(this.viewport());
       await this.rendition?.display(target);

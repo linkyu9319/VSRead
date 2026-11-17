@@ -51,6 +51,39 @@ async function mockHost(page: Page) {
 
 test.beforeEach(async ({ page }) => { await mockHost(page); await page.goto('/'); });
 
+async function holdEpubNavigation(page: Page, count = 1) {
+  await page.evaluate(count => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'srcdoc');
+    const set = descriptor?.set;
+    if (!descriptor || !set) throw new Error('浏览器不支持 EPUB 导航应答闸门');
+    (window as any).__heldEpubFrames = [];
+    let remaining = count;
+    // 延迟真实 iframe 加载，让输入框、弹层与切换标签页发生在导航完成前。
+    Object.defineProperty(HTMLIFrameElement.prototype, 'srcdoc', {
+      ...descriptor,
+      set(value: string) {
+        if (remaining-- > 0) (window as any).__heldEpubFrames.push(() => set.call(this, value));
+        else set.call(this, value);
+      },
+    });
+  }, count);
+}
+
+async function waitForHeldEpubFrame(page: Page, index = 0) {
+  await expect.poll(() => page.evaluate(() => (window as any).__heldEpubFrames.length)).toBeGreaterThan(index);
+}
+
+async function releaseEpubFrame(page: Page, index = 0) {
+  await page.evaluate(index => (window as any).__heldEpubFrames[index](), index);
+}
+
+async function expectReadingFocus(page: Page) {
+  await expect.poll(() => page.evaluate(() => {
+    const engine = document.querySelector('[data-testid="reader-engine"]');
+    return document.hasFocus() && !!engine?.contains(document.activeElement);
+  })).toBe(true);
+}
+
 test('TXT 章节、翻页、偏好和重启恢复', async ({ page }) => {
   await page.getByRole('button', { name: '阅读 示例 txt' }).click();
   await expect(page.locator('.txt-content')).toContainText('第一章 星海');
@@ -282,6 +315,117 @@ test('EPUB 滚动模式左键和上一页回到前章章首，连续切章不沿
   await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeLessThan(5);
   await expect.poll(savedCfi).toBe(firstChapterStart);
   await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('EPUB iframe 切章保留真实焦点，无需再点击即可连续键盘阅读与目录跳转', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 epub' }).click();
+  const frame = page.frameLocator('.epub-surface iframe');
+  const surface = page.locator('.epub-surface .epub-container');
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await frame.locator('h1').click();
+  await expectReadingFocus(page);
+  await page.keyboard.press('ArrowRight');
+  await expect(frame.locator('h1')).toHaveText('第二章 远航');
+  // CDP 可以向已失焦页面强发按键，因此必须同时检查真实 document.hasFocus。
+  await expectReadingFocus(page);
+  await page.keyboard.press('ArrowDown');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeGreaterThan(90);
+  await page.keyboard.press('ArrowUp');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeLessThan(10);
+  await page.keyboard.press('ArrowLeft');
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await expectReadingFocus(page);
+  await page.keyboard.press('ArrowRight');
+  await expect(frame.locator('h1')).toHaveText('第二章 远航');
+  await expectReadingFocus(page);
+  await page.getByRole('button', { name: '第一章 星海', exact: true }).click();
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await expectReadingFocus(page);
+  await page.keyboard.press('ArrowDown');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeGreaterThan(90);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('EPUB 延迟切章完成不抢回目录搜索焦点，后续导航完成也保持输入', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 epub' }).click();
+  const frame = page.frameLocator('.epub-surface iframe');
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await holdEpubNavigation(page, 2);
+  await page.getByRole('button', { name: '第二章 远航', exact: true }).click();
+  await waitForHeldEpubFrame(page);
+  await page.getByRole('button', { name: '第一章 星海', exact: true }).click();
+  const filter = page.getByLabel('筛选目录', { exact: true });
+  await filter.fill('星海');
+  await releaseEpubFrame(page);
+  await waitForHeldEpubFrame(page, 1);
+  await expect(filter).toBeFocused();
+  await releaseEpubFrame(page, 1);
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await expect(filter).toBeFocused();
+  const before = await page.locator('.epub-surface .epub-container').evaluate(node => node.scrollTop);
+  await page.keyboard.press('ArrowDown');
+  expect(await page.locator('.epub-surface .epub-container').evaluate(node => node.scrollTop)).toBe(before);
+});
+
+test('EPUB 切章等待期间打开阅读设置，完成后保留设置控件焦点', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 epub' }).click();
+  const frame = page.frameLocator('.epub-surface iframe');
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await frame.locator('h1').click();
+  await holdEpubNavigation(page);
+  await page.keyboard.press('ArrowRight');
+  await waitForHeldEpubFrame(page);
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: '阅读偏好', exact: true });
+  const font = page.getByLabel('字体', { exact: true });
+  await font.focus();
+  await releaseEpubFrame(page);
+  await expect(frame.locator('h1')).toHaveText('第二章 远航');
+  await expect(settings).toBeVisible();
+  await expect(font).toBeFocused();
+  const consumed = await frame.locator('body').evaluate(node => {
+    node.tabIndex = 0;
+    node.focus({ preventScroll: true });
+    const event = new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true });
+    node.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  expect(consumed).toBe(false);
+  await expect(frame.locator('h1')).toHaveText('第二章 远航');
+  await expect(settings).toBeVisible();
+});
+
+test('EPUB 等待切章时切到其他标签页，异步完成不夺取焦点', async ({ page, context }) => {
+  await page.getByRole('button', { name: '阅读 示例 epub' }).click();
+  const frame = page.frameLocator('.epub-surface iframe');
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await frame.locator('h1').click();
+  await holdEpubNavigation(page);
+  await page.keyboard.press('ArrowRight');
+  await waitForHeldEpubFrame(page);
+  const other = await context.newPage();
+  const readerProtocol = await context.newCDPSession(page);
+  const otherProtocol = await context.newCDPSession(other);
+  try {
+    // Playwright 默认把每个页面都模拟为获焦；这里验证真实标签页切换。
+    await Promise.all([
+      readerProtocol.send('Emulation.setFocusEmulationEnabled', { enabled: false }),
+      otherProtocol.send('Emulation.setFocusEmulationEnabled', { enabled: false }),
+    ]);
+    await other.setContent('<input aria-label="临时工作区输入框" />');
+    await other.bringToFront();
+    const input = other.getByLabel('临时工作区输入框', { exact: true });
+    await input.focus();
+    await expect.poll(() => page.evaluate(() => document.hasFocus())).toBe(false);
+    await releaseEpubFrame(page);
+    await expect(frame.locator('h1')).toHaveText('第二章 远航');
+    await expect(input).toBeFocused();
+    expect(await page.evaluate(() => document.hasFocus())).toBe(false);
+    expect(await other.evaluate(() => document.hasFocus())).toBe(true);
+  } finally {
+    await Promise.all([readerProtocol.detach(), otherProtocol.detach()]);
+    await other.close();
+  }
 });
 
 test('EPUB 分页模式上一页只退一页，不强制返回章节开头', async ({ page }) => {
