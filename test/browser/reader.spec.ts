@@ -240,6 +240,75 @@ test('EPUB iframe 上下键滚动当前章，右键切章不继承末尾位置',
   await expect.poll(() => page.locator('.epub-surface .epub-container').evaluate(node => node.scrollTop)).toBeGreaterThan(20);
 });
 
+test('EPUB 滚动模式左键和上一页回到前章章首，连续切章不沿用位置', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 epub' }).click();
+  const frame = page.frameLocator('.epub-surface iframe');
+  const surface = page.locator('.epub-surface .epub-container');
+  const savedCfi = () => page.evaluate(() => JSON.parse(localStorage.getItem('test-library')!).books.find((book: any) => book.format === 'epub').progress?.position.cfi as string | undefined);
+  const focusFrame = () => frame.locator('body').evaluate(node => { node.tabIndex = 0; node.focus({ preventScroll: true }); });
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await expect.poll(savedCfi).toMatch(/^epubcfi\(/);
+  const firstChapterStart = await savedCfi();
+
+  await page.getByRole('button', { name: '第二章 远航', exact: true }).click();
+  await expect(frame.locator('h1')).toHaveText('第二章 远航');
+  await surface.evaluate(node => { node.scrollTop = (node.scrollHeight - node.clientHeight) * .63; node.dispatchEvent(new Event('scroll')); });
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeGreaterThan(500);
+  await focusFrame();
+  await page.keyboard.press('ArrowLeft');
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeLessThan(5);
+  await expect.poll(savedCfi).toBe(firstChapterStart);
+
+  await focusFrame();
+  await page.keyboard.press('ArrowRight');
+  await expect(frame.locator('h1')).toHaveText('第二章 远航');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeLessThan(5);
+  await surface.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event('scroll')); });
+  await page.getByRole('button', { name: '上一页', exact: true }).click();
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeLessThan(5);
+  await expect.poll(savedCfi).toBe(firstChapterStart);
+
+  await surface.evaluate(node => { node.scrollTop = 650; node.dispatchEvent(new Event('scroll')); });
+  await expect.poll(savedCfi).not.toBe(firstChapterStart);
+  await focusFrame();
+  await page.keyboard.press('ArrowRight');
+  await expect(frame.locator('h1')).toHaveText('第二章 远航');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeLessThan(5);
+  await focusFrame();
+  await page.keyboard.press('ArrowLeft');
+  await expect(frame.locator('h1')).toHaveText('第一章 星海');
+  await expect.poll(() => surface.evaluate(node => node.scrollTop)).toBeLessThan(5);
+  await expect.poll(savedCfi).toBe(firstChapterStart);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('EPUB 分页模式上一页只退一页，不强制返回章节开头', async ({ page }) => {
+  await page.getByRole('button', { name: '阅读 示例 epub' }).waitFor();
+  await page.evaluate(() => {
+    const library = JSON.parse(localStorage.getItem('test-library')!);
+    library.settings.flow = 'paginated';
+    localStorage.setItem('test-library', JSON.stringify(library));
+  });
+  await page.reload();
+  await page.getByRole('button', { name: '阅读 示例 epub' }).click();
+  const savedCfi = () => page.evaluate(() => JSON.parse(localStorage.getItem('test-library')!).books.find((book: any) => book.format === 'epub').progress?.position.cfi as string | undefined);
+  await expect(page.frameLocator('.epub-surface iframe').locator('h1')).toHaveText('第一章 星海');
+  await expect.poll(savedCfi).toMatch(/^epubcfi\(/);
+  const firstPage = await savedCfi();
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await expect.poll(savedCfi).not.toBe(firstPage);
+  const secondPage = await savedCfi();
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  await expect.poll(savedCfi).not.toBe(secondPage);
+  await page.getByRole('button', { name: '上一页', exact: true }).click();
+  await expect.poll(savedCfi).toBe(secondPage);
+  expect(await savedCfi()).not.toBe(firstPage);
+  await expect(page.frameLocator('.epub-surface iframe').locator('h1')).toHaveText('第一章 星海');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
 test('PDF 上下键只滚动当前页，右键下一页从页首显示', async ({ page }) => {
   await page.getByRole('button', { name: '阅读 示例 pdf' }).click();
   const surface = page.locator('.pdf-surface');

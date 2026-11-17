@@ -125,17 +125,20 @@ export class EpubReader implements ReaderAdapter {
     if (this.destroyed || !this.ready || !rendition || this.moving) return;
     this.moving = true;
     clearTimeout(this.scrollTimer);
-    const previous = (rendition.getContents() as unknown as Contents[])[0]?.sectionIndex;
     stopReadingScroll(this.viewport());
     try {
-      await rendition[direction]();
-      if (this.destroyed) return;
-      const current = (rendition.getContents() as unknown as Contents[])[0]?.sectionIndex;
-      // scrolled-doc 复用外层滚动容器；跨章必须从章首开始，章内分页仍交由引擎处理。
-      if (this.settings.flow === 'scrolled' && current !== previous) {
+      if (this.settings.flow === 'scrolled') {
+        const index = (rendition.getContents() as unknown as Contents[])[0]?.sectionIndex;
+        const section = typeof index === 'number' ? this.book?.spine.get(index) : undefined;
+        const target = direction === 'next' ? section?.next() : section?.prev();
+        if (!target) return;
+        // prev() 的 prepend/resize 会补偿滚动位置；滚动阅读直接显示邻章，保证从章首开始。
+        await rendition.display(target.href);
+        if (this.destroyed) return;
         resetReadingScroll(this.viewport());
+        this.watchViewport();
         await rendition.reportLocation();
-      }
+      } else await rendition[direction]();
     } finally { this.moving = false; }
   }
   async next(): Promise<void> { await this.move('next'); }
