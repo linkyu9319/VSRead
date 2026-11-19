@@ -163,6 +163,14 @@ async function main() {
       } else assert.deepEqual((await panel.rpc('online.list')).result, []);
     }
     await vscode.commands.executeCommand('vsread.openLogs');
+    if (scenario !== 'damaged-online') {
+      const invalidSearch = await panel.rpc('online.searchAll.start', { query: '测试书名', sourceIds: [] });
+      assert.match(invalidSearch.error, /请选择.*书源/);
+      for (const method of ['online.searchAll.status', 'online.searchAll.cancel']) {
+        const missing = await panel.rpc(method, { id: 'missing-search-job' });
+        assert.match(missing.error, /搜索任务/);
+      }
+    }
     assert(shownDocuments.some(document => document.path === path.join(logs, 'vsread.log')));
     const events = shownDocuments.flatMap(document => document.text.trim().split('\n').map(line => JSON.parse(line).event));
     assert(events.includes('sidebar.registered'));

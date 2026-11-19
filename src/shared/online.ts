@@ -15,6 +15,15 @@ export interface BuiltinSourceSummary {
 }
 export interface SourceImportResult { sources: BookSource[]; imported: number; rejected: { name: string; reason: string }[] }
 export interface OnlineSearchResult { sourceId: string; title: string; author?: string; url: string }
+export interface SearchSourceStatus {
+  sourceId: string; name: string;
+  state: 'queued' | 'running' | 'success' | 'error' | 'cancelled';
+  count: number; elapsedMs?: number; error?: string;
+}
+export interface AggregateSearchJob {
+  id: string; query: string; state: 'running' | 'completed' | 'cancelled' | 'failed';
+  sources: SearchSourceStatus[]; results: OnlineSearchResult[]; truncated: boolean; error?: string;
+}
 export interface OnlineChapter { id: string; title: string; url: string }
 export interface OnlineBookRecord {
   id: string; sourceId: string; title: string; author?: string; url: string;
@@ -49,6 +58,9 @@ export interface OnlineRequests {
   'sources.remove': { args: { id: string }; result: BookSource[] };
   'online.list': { args: undefined; result: OnlineBookRecord[] };
   'online.search': { args: { sourceId: string; query: string; page: number }; result: OnlineSearchResult[] };
+  'online.searchAll.start': { args: { query: string; sourceIds: string[] }; result: AggregateSearchJob };
+  'online.searchAll.status': { args: { id: string }; result: AggregateSearchJob };
+  'online.searchAll.cancel': { args: { id: string }; result: AggregateSearchJob };
   'online.add': { args: { result: OnlineSearchResult }; result: OnlineBookRecord };
   'online.open': { args: { id: string; refresh?: boolean }; result: OnlineBookRecord };
   'online.chapter': { args: { id: string; chapter: number; refresh?: boolean }; result: OnlineChapterContent };

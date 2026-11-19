@@ -54,6 +54,32 @@ export class OnlineLibrary {
   }
   listSources(): BookSource[] { return clone(this.state.sources); }
   listBuiltinSources(): BuiltinSourceSummary[] { return listBuiltinSources(); }
+  /** 未添加的内置源默认可选；用户保存的配置及停用状态优先于内置定义。 */
+  listSearchSources(): BookSource[] {
+    const available = new Map(listBuiltinSources().map(item => {
+      const source = getBuiltinSource(item.id);
+      return [source.id, source] as const;
+    }));
+    for (const source of this.state.sources) available.set(source.id, source);
+    return clone([...available.values()].filter(source => source.enabled));
+  }
+  /** 搜索前一次性保存所选内置源，结果可直接加入书架；绝不重新启用停用源。 */
+  async prepareSearchSources(ids: string[]): Promise<void> {
+    if (!Array.isArray(ids) || !ids.length || ids.length > 50 || ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id))) throw new Error('请选择 1–50 个有效书源');
+    if (new Set(ids).size !== ids.length) throw new Error('请勿重复选择同一书源');
+    const selected = [...ids];
+    return this.withSources(async () => {
+      const available = new Map(this.listSearchSources().map(source => [source.id, source]));
+      const existing = new Set(this.state.sources.map(source => source.id));
+      const additions: BookSource[] = [];
+      for (const id of selected) {
+        const source = available.get(id);
+        if (!source) throw new Error('选中的书源已停用或不存在，请重新选择');
+        if (!existing.has(id)) additions.push(source);
+      }
+      if (additions.length) await this.commitSources([...this.state.sources, ...additions]);
+    });
+  }
   async addBuiltinSource(id: string): Promise<BookSource[]> {
     const source = getBuiltinSource(id);
     return this.withSources(async () => {
@@ -105,12 +131,14 @@ export class OnlineLibrary {
     });
   }
 
-  async search(sourceId: string, query: string, page = 1): Promise<OnlineSearchResult[]> {
+  async search(sourceId: string, query: string, page = 1, signal?: AbortSignal): Promise<OnlineSearchResult[]> {
+    signal?.throwIfAborted();
     const source = this.source(sourceId, true);
     if (typeof query !== 'string' || !query.trim() || query.length > 200) throw new Error('搜索内容需要 1–200 个字符');
     if (!Number.isSafeInteger(page) || page < 1 || page > 100) throw new Error('搜索页码无效');
     const target = source.searchUrl.replace(/\{\{\s*key\s*\}\}/g, encodeURIComponent(query.trim())).replace(/\{\{\s*page\s*\}\}/g, String(page));
-    const response = await this.request(resolveSourceUrl(source, target), undefined, { operation: 'search', source: source.name });
+    const response = await this.request(resolveSourceUrl(source, target), undefined, { operation: 'search', source: source.name }, signal);
+    signal?.throwIfAborted();
     const document = this.parsePage(source, response, 'search');
     const results: OnlineSearchResult[] = [];
     const seen = new Set<string>();
@@ -352,16 +380,22 @@ export class OnlineLibrary {
     }
   }
 
-  private request(url: string, maxBytes?: number, context: { operation: string; source: string } = { operation: 'request', source: '在线书源' }) {
+  private request(url: string, maxBytes?: number, context: { operation: string; source: string } = { operation: 'request', source: '在线书源' }, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const origin = new URL(url).origin;
     const queued = Date.now();
     // 同站点保持串行，避免触发频率限制；一个站点超时不再阻塞其它书源。
     const operation = (this.network.get(origin) ?? Promise.resolve()).then(async () => {
+      signal?.throwIfAborted();
       const started = Date.now();
       this.log?.('info', 'online.request', { ...context, url: diagnosticUrl(url), queuedMs: started - queued });
       try {
-        return await this.fetchText(url, { maxBytes, onTrace: event => this.log?.(event.stage === 'error' ? 'error' : 'info', 'network.' + event.stage, { ...context, ...event }) });
+        return await this.fetchText(url, { maxBytes, signal, onTrace: event => this.log?.(event.stage === 'error' ? 'error' : 'info', 'network.' + event.stage, { ...context, ...event }) });
       } catch (error) {
+        if (signal?.aborted) {
+          this.log?.('info', 'online.request_cancelled', { ...context, url: diagnosticUrl(url), elapsedMs: Date.now() - started });
+          signal.throwIfAborted();
+        }
         this.log?.('error', 'online.request_failed', { ...context, url: diagnosticUrl(url), elapsedMs: Date.now() - started, ...diagnosticError(error) });
         const labels: Record<string, string> = { search: '搜索', 'book-info': '书籍信息', toc: '目录', chapter: '章节正文', import: '书源导入' };
         throw new Error(`「${context.source}」${labels[context.operation] ?? '请求'}失败：${error instanceof Error ? error.message : String(error)}`, { cause: error });
@@ -370,7 +404,14 @@ export class OnlineLibrary {
     const tail = operation.then(() => undefined, () => undefined);
     this.network.set(origin, tail);
     void tail.then(() => { if (this.network.get(origin) === tail) this.network.delete(origin); });
-    return operation;
+    if (!signal) return operation;
+    // 取消等待立即通知调用方，同域队列仍等待原请求收尾，避免取消破坏串行顺序。
+    return new Promise<TextResponse>((resolve, reject) => {
+      const aborted = () => { signal.removeEventListener('abort', aborted); reject(signal.reason ?? new Error('搜索已取消')); };
+      signal.addEventListener('abort', aborted, { once: true });
+      operation.then(value => { signal.removeEventListener('abort', aborted); resolve(value); }, error => { signal.removeEventListener('abort', aborted); reject(error); });
+      if (signal.aborted) aborted();
+    });
   }
   private withBook<T>(id: string, operation: () => Promise<T>): Promise<T> {
     const pending = (this.bookOperations.get(id) ?? Promise.resolve()).catch(() => undefined).then(operation);

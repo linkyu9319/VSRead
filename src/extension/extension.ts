@@ -6,6 +6,7 @@ import { BookLibrary } from './library';
 import { renderWebview } from './webview';
 import { registerSidebar } from './sidebar';
 import { OnlineLibrary } from './online/library';
+import { AggregateSearchManager } from './online/aggregateSearch';
 import { UpdateService } from './updates';
 import { isRecord, normalizeSettings, validateProgress } from '../shared/validation';
 import type { OpenBook, RpcRequest, TextEncoding } from '../shared/model';
@@ -15,6 +16,7 @@ import { DiagnosticLog, diagnosticError } from './diagnostics';
 let store: LibraryStore | undefined;
 let onlineStore: OnlineLibrary | undefined;
 let diagnostics: DiagnosticLog | undefined;
+const searchSessions = new Set<() => void>();
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('VSRead');
@@ -90,6 +92,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const configure = async (target: vscode.WebviewPanel) => {
     panel = target;
+    const searches = new AggregateSearchManager(online);
+    let singleSearch: AbortController | undefined;
+    const stopSearches = () => { searches.cancelAll(); singleSearch?.abort(); };
+    searchSessions.add(stopSearches);
     setPanelFocus(target, false);
     target.webview.options = {
       enableScripts: true,
@@ -98,13 +104,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
     void vscode.commands.executeCommand('setContext', 'vsread.readerActive', target.active);
     target.onDidChangeViewState(event => { void vscode.commands.executeCommand('setContext', 'vsread.readerActive', event.webviewPanel.active); }, null, context.subscriptions);
-    target.onDidDispose(() => { if (panel === target) { panel = undefined; void vscode.commands.executeCommand('setContext', 'vsread.readerActive', false); } }, null, context.subscriptions);
+    target.onDidDispose(() => {
+      stopSearches(); searchSessions.delete(stopSearches);
+      if (panel === target) { panel = undefined; void vscode.commands.executeCommand('setContext', 'vsread.readerActive', false); }
+    }, null, context.subscriptions);
     // 所有 Webview 输入均视为不可信：只接受已导入书籍的 ID，从不接收文件路径。
     target.webview.onDidReceiveMessage(async (message: unknown) => {
       if (!isRecord(message) || typeof message.id !== 'string' || message.id.length > 100 || typeof message.method !== 'string') return;
       const request = message as unknown as RpcRequest;
       const started = Date.now();
-      const traced = /^(online\.(search|add|open|chapter|cache|cacheAll\.(start|cancel))|sources\.(import|builtin\.add)|updates\.(install|reload))$/.test(request.method);
+      const traced = /^(online\.(search|searchAll\.(start|cancel)|add|open|chapter|cache|cacheAll\.(start|cancel))|sources\.(import|builtin\.add)|updates\.(install|reload))$/.test(request.method);
       if (traced) log.write('info', 'rpc.start', { method: request.method, requestId: request.id });
       try {
         const args = isRecord(request.args) ? request.args : {};
@@ -168,7 +177,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           case 'sources.toggle': result = await online.toggleSource(requiredString(args.id), args.enabled === true); break;
           case 'sources.remove': result = await online.removeSource(requiredString(args.id)); break;
           case 'online.list': result = online.listBooks(); break;
-          case 'online.search': result = await online.search(requiredString(args.sourceId), requiredString(args.query), args.page as number); break;
+          case 'online.search': {
+            searches.cancelAll(); singleSearch?.abort();
+            const controller = singleSearch = new AbortController();
+            try { result = await online.search(requiredString(args.sourceId), requiredString(args.query), args.page as number, controller.signal); }
+            finally { if (singleSearch === controller) singleSearch = undefined; }
+            break;
+          }
+          case 'online.searchAll.start': {
+            if (!Array.isArray(args.sourceIds) || !args.sourceIds.every(id => typeof id === 'string')) throw new Error('请选择有效的搜索书源');
+            const job = searches.start(requiredString(args.query), args.sourceIds as string[]);
+            singleSearch?.abort();
+            result = job;
+            break;
+          }
+          case 'online.searchAll.status': result = searches.status(requiredString(args.id)); break;
+          case 'online.searchAll.cancel': result = searches.cancel(requiredString(args.id)); break;
           case 'online.add': {
             if (!isRecord(args.result)) throw new Error('书籍信息无效');
             result = await online.add(args.result as unknown as OnlineSearchResult);
@@ -250,6 +274,8 @@ function errorMessage(error: unknown): string { return error instanceof Error ? 
 function requiredString(value: unknown): string { if (typeof value !== 'string' || !value.trim()) throw new Error('请求参数无效'); return value; }
 function optionalString(value: unknown): string | undefined { if (value === undefined) return undefined; return requiredString(value); }
 export async function deactivate(): Promise<void> {
+  for (const stopSearches of searchSessions) stopSearches();
+  searchSessions.clear();
   onlineStore?.cancelAllCacheJobs();
   await Promise.all([store?.flush(), onlineStore?.flush()]);
   await diagnostics?.flush();
