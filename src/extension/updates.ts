@@ -3,11 +3,22 @@ import type * as vscode from 'vscode';
 import path from 'node:path';
 import type { UpdateInstallResult, UpdateStatus } from '../shared/online';
 import { installUpdate, selectUpdateAsset } from './updateInstaller';
+import type { DiagnosticSink } from './diagnostics';
 
 export const RELEASES_URL = 'https://github.com/linkyu9319/VSRead/releases';
 export const LATEST_RELEASE_API = 'https://api.github.com/repos/linkyu9319/VSRead/releases/latest';
 const TOKEN_KEY = 'vsread.githubToken';
 const MAX_RESPONSE_BYTES = 512 * 1024;
+// 只接受已知网络错误码，异常自带的 code 也可能包含凭据等私密内容。
+const CHECK_ERROR_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ABORT_ERR', 'ERR_ABORTED', 'ERR_TLS_CERT_ALTNAME_INVALID', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE']);
+
+function checkErrorCode(error: unknown): string {
+  try {
+    const value = error as { code?: unknown; cause?: { code?: unknown }; errors?: { code?: unknown }[] } | null;
+    const code = value?.code ?? value?.cause?.code ?? value?.errors?.[0]?.code;
+    return typeof code === 'string' && CHECK_ERROR_CODES.has(code) ? code : 'UNKNOWN';
+  } catch { return 'UNKNOWN'; }
+}
 
 // VS Code 1.85 只拦截 CJS 的 vscode 加载；按需 require 兼容旧版 IDE 及纯 Node 测试。
 function vscodeApi(): typeof import('vscode') { return require('vscode'); }
@@ -15,6 +26,7 @@ function vscodeApi(): typeof import('vscode') { return require('vscode'); }
 interface Version { core: bigint[]; prerelease: string[] }
 interface ReleaseResponse { status: number; body: string }
 export interface UpdateServiceOptions {
+  log?: DiagnosticSink;
   request?: (token: string | undefined) => Promise<ReleaseResponse>;
   inputToken?: () => Promise<string | undefined>;
   openExternal?: (url: string) => Promise<boolean>;
@@ -128,12 +140,32 @@ export class UpdateService {
     if (!this.pending) this.pending = this.checkOnce().finally(() => { this.pending = undefined; });
     return this.pending;
   }
+
+  private writeCheckLog(event: string, details: Record<string, unknown>): void {
+    try { this.options.log?.(event === 'updates.check.failed' ? 'warn' : 'info', event, details); }
+    catch { /* 诊断输出失败不影响版本检查。 */ }
+  }
+
   private async checkOnce(): Promise<UpdateStatus> {
+    const started = Date.now();
+    let phase: 'credentials' | 'request' = 'credentials';
+    this.writeCheckLog('updates.check.start', { currentVersion: this.currentVersion, phase });
     try {
       const token = await this.context.secrets.get(TOKEN_KEY);
+      phase = 'request';
       const response = await (this.options.request ?? requestLatestRelease)(token);
-      return releaseStatus(this.currentVersion, response, Boolean(token));
-    } catch {
+      const status = releaseStatus(this.currentVersion, response, Boolean(token));
+      this.writeCheckLog('updates.check.result', {
+        currentVersion: this.currentVersion, latestVersion: status.latestVersion, state: status.state,
+        httpStatus: response.status, phase, elapsedMs: Date.now() - started,
+      });
+      return status;
+    } catch (error) {
+      // 仅记录阶段和受控错误码，凭据、响应正文和底层异常文本不进入诊断日志。
+      this.writeCheckLog('updates.check.failed', {
+        currentVersion: this.currentVersion, state: 'unavailable', phase, elapsedMs: Date.now() - started,
+        errorCode: checkErrorCode(error),
+      });
       // 网络和凭据错误只返回固定提示，不把可能包含请求信息的异常暴露给 Webview。
       return unavailable(this.currentVersion, '无法连接 GitHub，请检查网络连接后重试。');
     }

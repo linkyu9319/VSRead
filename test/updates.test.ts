@@ -74,6 +74,86 @@ test('检查错误不暴露底层请求或令牌，取消输入不改变凭据',
   assert(!JSON.stringify(status).includes('secret-value'));
 });
 
+test('0.1.12 可发现 0.2.0，合并的并发检查只记录一次起止', async () => {
+  const entries: { event: string; details?: Record<string, unknown> }[] = [];
+  const context = {
+    extension: { packageJSON: { version: '0.1.12' } },
+    secrets: { get: async () => 'private-access-value' },
+  } as unknown as vscode.ExtensionContext;
+  let requests = 0;
+  const updates = new UpdateService(context, {
+    log: (_level, event, details) => { entries.push({ event, details }); },
+    request: async token => {
+      requests++; assert.equal(token, 'private-access-value');
+      return { status: 200, body: JSON.stringify({ tag_name: 'v0.2.0', body: 'private-response-value' }) };
+    },
+  });
+  const first = updates.check();
+  assert.equal(updates.check(), first);
+  const status = await first;
+  assert.equal(status.state, 'available');
+  assert.equal(status.latestVersion, '0.2.0');
+  assert.equal(requests, 1);
+  assert.deepEqual(entries.map(entry => entry.event), ['updates.check.start', 'updates.check.result']);
+  assert.deepEqual(entries[0].details, { currentVersion: '0.1.12', phase: 'credentials' });
+  assert.equal(entries[1].details?.phase, 'request');
+  assert.equal(entries[1].details?.state, 'available');
+  assert.equal(entries[1].details?.httpStatus, 200);
+  assert.equal(entries[1].details?.latestVersion, '0.2.0');
+  assert.equal(typeof entries[1].details?.elapsedMs, 'number');
+  assert(!JSON.stringify(entries).includes('private-'));
+});
+
+test('检查失败日志区分凭据与请求阶段，只记录受控错误码', async () => {
+  for (const phase of ['credentials', 'request'] as const) {
+    const entries: { event: string; details?: Record<string, unknown> }[] = [];
+    const failure = Object.assign(new Error('private-message-value Authorization: Bearer private-access-value'), {
+      code: phase === 'request' ? 'ECONNRESET' : 'private-code-value',
+    });
+    const context = {
+      extension: { packageJSON: { version: '0.1.12' } },
+      secrets: { get: async () => { if (phase === 'credentials') throw failure; return 'private-access-value'; } },
+    } as unknown as vscode.ExtensionContext;
+    let requests = 0;
+    const updates = new UpdateService(context, {
+      log: (_level, event, details) => { entries.push({ event, details }); },
+      request: async () => { requests++; throw failure; },
+    });
+    assert.equal((await updates.check()).state, 'unavailable');
+    assert.equal(requests, phase === 'request' ? 1 : 0);
+    assert.deepEqual(entries.map(entry => entry.event), ['updates.check.start', 'updates.check.failed']);
+    assert.equal(entries[1].details?.phase, phase);
+    assert.equal(entries[1].details?.errorCode, phase === 'request' ? 'ECONNRESET' : 'UNKNOWN');
+    assert.equal(typeof entries[1].details?.elapsedMs, 'number');
+    assert(!JSON.stringify(entries).includes('private-'));
+    assert(!JSON.stringify(entries).includes('Authorization'));
+  }
+});
+
+test('诊断输出异常不影响检查结果，HTTP 失败仍记录状态', async () => {
+  const context = {
+    extension: { packageJSON: { version: '0.1.12' } },
+    secrets: { get: async () => undefined },
+  } as unknown as vscode.ExtensionContext;
+  let logCalls = 0;
+  const updates = new UpdateService(context, {
+    log: () => { logCalls++; throw new Error('模拟诊断输出故障'); },
+    request: async () => ({ status: 200, body: '{"tag_name":"v0.2.0"}' }),
+  });
+  assert.equal((await updates.check()).state, 'available');
+  assert.equal(logCalls, 2);
+  const entries: { event: string; details?: Record<string, unknown> }[] = [];
+  const limited = new UpdateService(context, {
+    log: (_level, event, details) => { entries.push({ event, details }); },
+    request: async () => ({ status: 429, body: 'private-response-value' }),
+  });
+  assert.equal((await limited.check()).state, 'unavailable');
+  assert.equal(entries[1].event, 'updates.check.result');
+  assert.equal(entries[1].details?.httpStatus, 429);
+  assert.equal(entries[1].details?.state, 'unavailable');
+  assert(!JSON.stringify(entries).includes('private-'));
+});
+
 const installContext = () => ({
   extension: { packageJSON: { version: '0.1.8' } },
   globalStorageUri: { fsPath: 'C:/vsread-test-storage' },

@@ -121,7 +121,15 @@ async function mockOnlineHost(page: Page) {
             case 'online.cacheAll.cancel': if (jobs[book.id]?.state === 'running') jobs[book.id].state = 'cancelling'; result = snapshot(book); break;
             case 'online.clearCache': delete jobs[book.id]; book.cachedChapters = []; result = book; break;
             case 'online.remove': state.books = state.books.filter((item: any) => item.id !== args.id); result = state.books; break;
-            case 'updates.check': result = { state: 'available', currentVersion: '0.1.2', latestVersion: '0.2.0', releaseUrl: 'https://github.com/linkyu9319/VSRead/releases/tag/v0.2.0', message: '发现新版本 0.2.0' }; break;
+            case 'updates.check': {
+              const configured = (window as any).__checkResponses?.shift();
+              if ((window as any).__holdCheck) await new Promise<void>(resolve => {
+                (window as any).__finishCheck = () => { (window as any).__holdCheck = false; resolve(); };
+              });
+              if (configured?.error) throw new Error(configured.error);
+              result = configured?.result ?? { state: 'available', currentVersion: '0.1.2', latestVersion: '0.2.0', releaseUrl: 'https://github.com/linkyu9319/VSRead/releases/tag/v0.2.0', message: '发现新版本 0.2.0' };
+              break;
+            }
             case 'updates.install': {
               (window as any).__installAttempts = ((window as any).__installAttempts ?? 0) + 1;
               if ((window as any).__holdInstall) await new Promise<void>(resolve => { (window as any).__finishInstall = resolve; });
@@ -223,6 +231,77 @@ test('配置链接导入与版本检查入口', async ({ page }) => {
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 
+for (const first of [
+  { state: 'current', currentVersion: '0.1.12', latestVersion: '0.1.12', message: '当前版本已是最新正式版本。' },
+  { state: 'unavailable', currentVersion: '0.1.12', message: '无法连接 GitHub，请检查网络连接后重试。' },
+]) {
+  test(`顶部检查更新在 ${first.state} 后重新请求，不复用旧状态`, async ({ page }) => {
+    await page.evaluate(first => {
+      (window as any).__checkResponses = [{ result: first }, { result: { state: 'available', currentVersion: '0.1.12', latestVersion: '0.2.1', message: '发现新版本 0.2.1' } }];
+    }, first);
+    const toggle = page.locator('[data-update-toggle]');
+    const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+    await toggle.click();
+    await expect(dialog).toContainText(first.message);
+    await dialog.getByRole('button', { name: '关闭软件更新', exact: true }).click();
+    await page.evaluate(() => { (window as any).__holdCheck = true; });
+    await toggle.click();
+    await expect(dialog.getByRole('status')).toHaveText('正在从 GitHub 获取最新版本，请稍候…');
+    await expect(dialog).not.toContainText(first.message);
+    await page.evaluate(() => (window as any).__finishCheck());
+    await expect(dialog).toContainText('发现新版本 0.2.1');
+    await expect(dialog).not.toContainText(first.message);
+    expect(await page.evaluate(() => (window as any).__onlineRpc.filter((call: any) => call.method === 'updates.check').length)).toBe(2);
+    // 弹层已打开时再点顶部，也应继续发起主动检查。
+    await toggle.click();
+    await expect(dialog).toContainText('发现新版本 0.2.0');
+    expect(await page.evaluate(() => (window as any).__onlineRpc.filter((call: any) => call.method === 'updates.check').length)).toBe(3);
+  });
+}
+
+test('检查请求异常后可从顶部重试，慢请求有反馈且重开不重复', async ({ page }) => {
+  await page.evaluate(() => { (window as any).__checkResponses = [{ error: '模拟检查请求失败' }]; });
+  const toggle = page.locator('[data-update-toggle]');
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  await toggle.click();
+  await expect(dialog.getByRole('alert')).toHaveText('模拟检查请求失败');
+  await dialog.getByRole('button', { name: '关闭软件更新', exact: true }).click();
+  await page.evaluate(() => { (window as any).__holdCheck = true; });
+  await toggle.click();
+  await expect(dialog.getByRole('status')).toHaveText('正在从 GitHub 获取最新版本，请稍候…');
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: '检查中…', exact: true })).toBeDisabled();
+  await dialog.getByRole('button', { name: '关闭软件更新', exact: true }).click();
+  await toggle.click();
+  await expect(dialog.getByRole('status')).toHaveText('正在从 GitHub 获取最新版本，请稍候…');
+  expect(await page.evaluate(() => (window as any).__onlineRpc.filter((call: any) => call.method === 'updates.check').length)).toBe(2);
+  await page.evaluate(() => (window as any).__finishCheck());
+  await expect(dialog).toContainText('发现新版本 0.2.0');
+  await expect(dialog.getByRole('button', { name: '一键更新', exact: true })).toBeEnabled();
+});
+
+test('配置或清除令牌后自动重查并清除旧错误', async ({ page }) => {
+  await page.evaluate(() => {
+    (window as any).__checkResponses = [
+      { error: '旧令牌检查失败' },
+      { result: { state: 'available', currentVersion: '0.1.12', latestVersion: '0.2.1', message: '发现新版本 0.2.1' } },
+      { result: { state: 'current', currentVersion: '0.1.12', latestVersion: '0.1.12', message: '当前版本已是最新正式版本。' } },
+    ];
+  });
+  await page.locator('[data-update-toggle]').click();
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  await expect(dialog.getByRole('alert')).toHaveText('旧令牌检查失败');
+  await dialog.getByRole('button', { name: '配置访问令牌', exact: true }).click();
+  await expect(dialog).toContainText('发现新版本 0.2.1');
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__authAction)).toBe('set');
+  await dialog.getByRole('button', { name: '清除令牌', exact: true }).click();
+  await expect(dialog).toContainText('当前版本已是最新正式版本。');
+  await expect(dialog).not.toContainText('发现新版本 0.2.1');
+  expect(await page.evaluate(() => (window as any).__authAction)).toBe('clear');
+  expect(await page.evaluate(() => (window as any).__onlineRpc.filter((call: any) => call.method === 'updates.check').length)).toBe(3);
+});
+
 test('一键更新安装期间不重复操作，关闭面板后保留结果并可重载窗口', async ({ page }) => {
   await page.getByRole('button', { name: '检查更新', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
@@ -243,6 +322,11 @@ test('一键更新安装期间不重复操作，关闭面板后保留结果并�
   await page.getByRole('button', { name: '检查更新', exact: true }).click();
   await expect(dialog).toContainText('更新已安装，重载窗口后生效');
   await expect(dialog.getByRole('button', { name: '一键更新', exact: true })).toHaveCount(0);
+  await dialog.getByRole('button', { name: '关闭软件更新', exact: true }).click();
+  await page.locator('[data-update-toggle]').click();
+  await expect(dialog.getByRole('button', { name: '重载窗口', exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).__onlineRpc.filter((call: any) => call.method === 'updates.check').length)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__installAttempts)).toBe(1);
   await dialog.getByRole('button', { name: '重载窗口', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__reloadRequested)).toBe(true);
   await expect(page.getByRole('alert')).toHaveCount(0);

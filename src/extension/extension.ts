@@ -43,7 +43,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let onlineError: string | undefined;
   try { await online.load(); onlineStore = online; }
   catch (error) { onlineError = `在线书库暂不可用：${errorMessage(error)}`; log.write('error', 'online.load_failed', diagnosticError(error)); }
-  const updates = new UpdateService(context);
+  const updates = new UpdateService(context, { log: log.write });
   let panel: vscode.WebviewPanel | undefined;
   let importing = false;
   let requestedView: 'online' | undefined;

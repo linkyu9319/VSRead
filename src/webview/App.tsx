@@ -153,10 +153,11 @@ export function App() {
     finally { setBusy(false); }
   };
   const currentBook = source && library.books.find(book => book.id === source.book.id);
-  const checkUpdates = async () => {
+  const checkUpdates = async (reveal = true) => {
     if (updateOperation.current || updateInstallResult?.state === 'installed') return;
     updateOperation.current = true;
-    setSettingsVisible(false); setUpdatesVisible(true); setCheckingUpdates(true);
+    if (reveal) { setSettingsVisible(false); setUpdatesVisible(true); }
+    setCheckingUpdates(true); setUpdateStatus(undefined);
     setUpdateError(''); setUpdateInstallResult(undefined);
     try { setUpdateStatus(await request('updates.check', undefined)); }
     catch (error) { setUpdateError(error instanceof Error ? error.message : String(error)); }
@@ -164,7 +165,8 @@ export function App() {
   };
   const showUpdates = () => {
     setSettingsVisible(false); setUpdatesVisible(true);
-    if (!updateStatus && !updateInstallResult && !updateError) void checkUpdates();
+    // 顶部入口表示主动检查；进行中的操作和等待重载的安装结果仍保留。
+    void checkUpdates();
   };
   const installUpdate = async () => {
     if (updateOperation.current || updateInstallResult?.state === 'installed') return;
@@ -183,9 +185,12 @@ export function App() {
   const updateAuth = async (action: 'set' | 'clear') => {
     if (updateOperation.current || updateInstallResult?.state === 'installed') return;
     updateOperation.current = true; setUpdateError('');
-    try { await request('updates.auth', { action }); setUpdateStatus(undefined); }
+    let changed = false;
+    try { await request('updates.auth', { action }); setUpdateStatus(undefined); changed = true; }
     catch (error) { setUpdateError(error instanceof Error ? error.message : String(error)); }
     finally { updateOperation.current = false; }
+    // 凭据操作与检查共用锁，释放后再重查；关闭弹层不会被异步结果重新打开。
+    if (changed) await checkUpdates(false);
   };
   return <div className="app" data-theme={library.settings.theme} data-focus={focusMode ? 'true' : undefined} style={customThemeStyle(library.settings)} onPointerDownCapture={event => {
     if (settingsVisible && event.target instanceof Element && !event.target.closest('.settings-panel, [data-settings-toggle]')) setSettingsVisible(false);

@@ -17,6 +17,7 @@ export function UpdatesPanel({ status, checking, installing, reloading, installR
   return <section className="settings-panel update-panel" role="dialog" aria-label="软件更新">
     <div className="panel-heading">软件更新<button className="icon-button" aria-label="关闭软件更新" onClick={onClose}><Icon name="close" size={15} /></button></div>
     <p className="update-description">从 GitHub 检查 VSRead 的最新稳定版本。</p>
+    {checking && <p className="settings-hint" role="status">正在从 GitHub 获取最新版本，请稍候…</p>}
     {status && <div className="update-status" role="status"><p>{status.message}</p><small>当前版本 {status.currentVersion}{status.latestVersion && ` · 最新版本 ${status.latestVersion}`}</small></div>}
     {installing && <p className="settings-hint" role="status">正在更新，请稍候…</p>}
     {installResult && <p className="settings-hint" role="status">{installResult.message}</p>}
