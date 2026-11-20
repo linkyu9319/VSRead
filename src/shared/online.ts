@@ -44,6 +44,7 @@ export interface OnlineState { sources: BookSource[]; books: OnlineBookRecord[] 
 export interface UpdateStatus {
   state: 'available' | 'current' | 'unavailable'; currentVersion: string;
   latestVersion?: string; releaseUrl?: string; publishedAt?: string; message: string;
+  errorCode?: 'rate-limited' | 'forbidden' | 'unauthorized'; retryAt?: string;
 }
 export interface UpdateInstallResult {
   state: 'installed' | 'cancelled'; version?: string; message: string;

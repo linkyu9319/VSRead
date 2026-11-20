@@ -26,7 +26,7 @@ export function UpdatesPanel({ status, checking, installing, reloading, installR
       {installed ? <button className="primary" disabled={busy} onClick={onReload}>{reloading ? '正在重载…' : '重载窗口'}</button> : status?.state === 'available' && <button className="primary" disabled={busy} onClick={onInstall}>{installing ? '正在更新…' : error ? '重试更新' : '一键更新'}</button>}
       <button className="text-button" disabled={busy || installed} onClick={onCheck}>{checking ? '检查中…' : '检查更新'}</button><button className="text-button" onClick={onOpen}>查看发布页</button>
     </div>
-    <p className="settings-hint">私有仓库需要只读访问令牌，令牌保存在 IDE 密钥存储中。</p>
+    <p className="settings-hint">公开仓库通常无需令牌。访问私有仓库或使用认证请求额度时可配置只读令牌，仅保存在 IDE 密钥存储中。</p>
     <div className="update-actions"><button className="text-button" disabled={busy || installed} onClick={() => onAuth('set')}>配置访问令牌</button><button className="text-button" disabled={busy || installed} onClick={() => onAuth('clear')}>清除令牌</button></div>
   </section>;
 }

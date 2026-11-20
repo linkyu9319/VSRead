@@ -47,7 +47,7 @@ async function mockOnlineHost(page: Page) {
     window.acquireVsCodeApi = () => ({
       getState: () => JSON.parse(localStorage.getItem('fixture-view') ?? '{}'), setState: value => localStorage.setItem('fixture-view', JSON.stringify(value)),
       postMessage: async ({ id, method, args }: any) => {
-        (window as any).__onlineRpc.push({ method, args });
+        (window as any).__onlineRpc.push({ id, method, args });
         try {
           let result: any;
           const book = state.books.find((book: any) => book.id === args?.id);
@@ -126,8 +126,11 @@ async function mockOnlineHost(page: Page) {
               if ((window as any).__holdCheck) await new Promise<void>(resolve => {
                 (window as any).__finishCheck = () => { (window as any).__holdCheck = false; resolve(); };
               });
-              if (configured?.error) throw new Error(configured.error);
-              result = configured?.result ?? { state: 'available', currentVersion: '0.1.2', latestVersion: '0.2.0', releaseUrl: 'https://github.com/linkyu9319/VSRead/releases/tag/v0.2.0', message: '发现新版本 0.2.0' };
+              if (configured && 'error' in configured) {
+                setTimeout(() => window.postMessage({ id, error: configured.error }, '*'), 0);
+                return;
+              }
+              result = configured && 'result' in configured ? configured.result : { state: 'available', currentVersion: '0.1.2', latestVersion: '0.2.0', releaseUrl: 'https://github.com/linkyu9319/VSRead/releases/tag/v0.2.0', message: '发现新版本 0.2.0' };
               break;
             }
             case 'updates.install': {
@@ -275,6 +278,77 @@ test('检查请求异常后可从顶部重试，慢请求有反馈且重开不�
   await toggle.click();
   await expect(dialog.getByRole('status')).toHaveText('正在从 GitHub 获取最新版本，请稍候…');
   expect(await page.evaluate(() => (window as any).__onlineRpc.filter((call: any) => call.method === 'updates.check').length)).toBe(2);
+  await page.evaluate(() => (window as any).__finishCheck());
+  await expect(dialog).toContainText('发现新版本 0.2.0');
+  await expect(dialog.getByRole('button', { name: '一键更新', exact: true })).toBeEnabled();
+});
+
+test('更新检查空回复与畸形结果明确报错，重试可恢复且不显示原始响应', async ({ page }) => {
+  await page.evaluate(() => {
+    (window as any).__checkResponses = [
+      { result: undefined }, { result: null }, { result: {} }, { result: 'private-response-body' },
+      { result: { state: 'available', currentVersion: '0.1.12', latestVersion: '0.2.2', message: '' } },
+      { result: { state: 'unexpected', currentVersion: '0.1.12', message: 'private-response-body' } },
+      { result: { state: { toString: 'private-response-body' }, currentVersion: '0.1.12', message: 'private-response-body' } },
+    ];
+  });
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  for (let attempt = 0; attempt < 7; attempt++) {
+    await page.locator('[data-update-toggle]').click();
+    await expect(dialog.getByRole('alert')).toHaveText('更新检查返回异常，请重试或打开诊断日志。');
+    await expect(dialog.getByRole('button', { name: '检查更新', exact: true })).toBeEnabled();
+    await expect(dialog.getByRole('button', { name: '一键更新', exact: true })).toHaveCount(0);
+    await expect(dialog).not.toContainText('private-response-body');
+  }
+  await dialog.getByRole('button', { name: '检查更新', exact: true }).click();
+  await expect(dialog).toContainText('发现新版本 0.2.0');
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+});
+
+test('更新检查空错误或非文本错误均有固定反馈，不会静默完成', async ({ page }) => {
+  await page.evaluate(() => {
+    (window as any).__checkResponses = [{ error: '' }, { error: null }, { error: { body: 'private-error-body' } }];
+  });
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.locator('[data-update-toggle]').click();
+    await expect(dialog.getByRole('alert')).toHaveText('操作失败，请重试。');
+    await expect(dialog.getByRole('button', { name: '检查更新', exact: true })).toBeEnabled();
+    await expect(dialog).not.toContainText('private-error-body');
+  }
+});
+
+test('页面重载隔离旧会话回复，非RPC回显不会提前结束新检查', async ({ page }) => {
+  await page.evaluate(() => { (window as any).__holdCheck = true; });
+  await page.locator('[data-update-toggle]').click();
+  const dialog = page.getByRole('dialog', { name: '软件更新', exact: true });
+  await expect(dialog.getByRole('button', { name: '检查中…', exact: true })).toBeDisabled();
+  const previous = await page.evaluate(() => (window as any).__onlineRpc.find((call: any) => call.method === 'updates.check').id as string);
+
+  await page.reload();
+  await expect(page.getByRole('region', { name: '我的书架', exact: true })).toBeVisible();
+  await page.evaluate(() => { (window as any).__holdCheck = true; });
+  await page.locator('[data-update-toggle]').click();
+  await expect(dialog.getByRole('button', { name: '检查中…', exact: true })).toBeDisabled();
+  const current = await page.evaluate(() => (window as any).__onlineRpc.find((call: any) => call.method === 'updates.check').id as string);
+  expect(current).not.toBe(previous);
+  expect(current.length).toBeLessThanOrEqual(100);
+  await page.evaluate(async ({ previous, current }) => {
+    // 等三个消息均投递后再断言，避免测试在事件尚未处理时提前通过。
+    await new Promise<void>(resolve => {
+      let received = 0;
+      const delivered = (event: MessageEvent) => {
+        if (event.data?.id !== previous && event.data?.id !== current) return;
+        if (++received === 3) { window.removeEventListener('message', delivered); resolve(); }
+      };
+      window.addEventListener('message', delivered);
+      window.postMessage({ id: previous }, '*');
+      window.postMessage({ id: current, method: 'updates.check' }, '*');
+      window.postMessage({ id: current, event: 'progress' }, '*');
+    });
+  }, { previous, current });
+  await expect(dialog.getByRole('button', { name: '检查中…', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
   await page.evaluate(() => (window as any).__finishCheck());
   await expect(dialog).toContainText('发现新版本 0.2.0');
   await expect(dialog.getByRole('button', { name: '一键更新', exact: true })).toBeEnabled();

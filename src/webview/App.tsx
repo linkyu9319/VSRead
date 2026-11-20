@@ -14,6 +14,17 @@ import { UpdatesPanel } from './components/UpdatesPanel';
 import type { UpdateInstallResult, UpdateStatus } from '../shared/online';
 import './online.css';
 
+function checkedUpdateStatus(value: unknown): UpdateStatus {
+  const status = value as Partial<UpdateStatus> | null;
+  const text = (value: unknown) => typeof value === 'string' && !!value.trim() && value.length <= 512;
+  // RPC 的空回复对保存进度等操作合法，但检查更新必须有可展示的完整结果。
+  if (!status || typeof status !== 'object' || Array.isArray(status) || typeof status.state !== 'string' || !['available', 'current', 'unavailable'].includes(status.state)
+    || !text(status.currentVersion) || !text(status.message) || (status.state !== 'unavailable' && !text(status.latestVersion))) {
+    throw new Error('更新检查返回异常，请重试或打开诊断日志。');
+  }
+  return status as UpdateStatus;
+}
+
 export function App() {
   const [library, setLibrary] = useState<Library>({ version: 1, books: [], settings: DEFAULT_SETTINGS });
   const [source, setSource] = useState<OpenBook>();
@@ -159,8 +170,8 @@ export function App() {
     if (reveal) { setSettingsVisible(false); setUpdatesVisible(true); }
     setCheckingUpdates(true); setUpdateStatus(undefined);
     setUpdateError(''); setUpdateInstallResult(undefined);
-    try { setUpdateStatus(await request('updates.check', undefined)); }
-    catch (error) { setUpdateError(error instanceof Error ? error.message : String(error)); }
+    try { setUpdateStatus(checkedUpdateStatus(await request('updates.check', undefined))); }
+    catch (error) { setUpdateError(error instanceof Error && error.message.trim() ? error.message : '检查更新失败，请重试或查看发布页。'); }
     finally { updateOperation.current = false; setCheckingUpdates(false); }
   };
   const showUpdates = () => {

@@ -24,7 +24,10 @@ function checkErrorCode(error: unknown): string {
 function vscodeApi(): typeof import('vscode') { return require('vscode'); }
 
 interface Version { core: bigint[]; prerelease: string[] }
-interface ReleaseResponse { status: number; body: string }
+interface ReleaseResponse {
+  status: number; body: string;
+  rateLimitRemaining?: number; rateLimitReset?: number; retryAfter?: number;
+}
 export interface UpdateServiceOptions {
   log?: DiagnosticSink;
   request?: (token: string | undefined) => Promise<ReleaseResponse>;
@@ -68,8 +71,46 @@ export function compareVersions(left: string, right: string): number | undefined
   return 0;
 }
 
-function unavailable(currentVersion: string, message: string): UpdateStatus {
-  return { state: 'unavailable', currentVersion, message };
+function unavailable(currentVersion: string, message: string, details: Pick<UpdateStatus, 'errorCode' | 'retryAt'> = {}): UpdateStatus {
+  return { state: 'unavailable', currentVersion, message, ...details };
+}
+
+function boundedInteger(value: unknown, maximum: number): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maximum ? value : undefined;
+}
+
+function rateLimitInfo(response: ReleaseResponse): Pick<ReleaseResponse, 'rateLimitRemaining' | 'rateLimitReset' | 'retryAfter'> {
+  return {
+    rateLimitRemaining: boundedInteger(response.rateLimitRemaining, 1_000_000_000),
+    rateLimitReset: boundedInteger(response.rateLimitReset, Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60),
+    retryAfter: boundedInteger(response.retryAfter, 7 * 24 * 60 * 60),
+  };
+}
+
+function rateLimitReason(response: ReleaseResponse): 'primary-rate-limit' | 'secondary-rate-limit' | 'rate-limited' | undefined {
+  if (response.status !== 403 && response.status !== 429) return;
+  if (rateLimitInfo(response).rateLimitRemaining === 0) return 'primary-rate-limit';
+  // 只识别 GitHub 的已知限流标记，远端错误正文不直接进入界面或日志。
+  let message: unknown;
+  try { message = JSON.parse(response.body)?.message; } catch { /* 非 JSON 的拒绝响应不能据此断言限流。 */ }
+  if (typeof message === 'string') {
+    if (/secondary rate limit|^you have triggered an abuse detection mechanism/i.test(message)) return 'secondary-rate-limit';
+    if (/^api rate limit exceeded\b/i.test(message)) return 'primary-rate-limit';
+  }
+  if (response.status === 429) return 'rate-limited';
+}
+
+function limitedStatus(currentVersion: string, response: ReleaseResponse, authenticated: boolean): UpdateStatus {
+  const now = Date.now();
+  const { rateLimitRemaining, rateLimitReset, retryAfter } = rateLimitInfo(response);
+  const retryAfterTime = retryAfter !== undefined ? now + retryAfter * 1000 : undefined;
+  // 主额度耗尽时同时遵守重置窗口；二级限流则优先使用服务端的 Retry-After。
+  const resetTime = rateLimitReset !== undefined && (rateLimitRemaining === 0 || retryAfter === undefined) ? rateLimitReset * 1000 : undefined;
+  const retryTime = retryAfterTime !== undefined && resetTime !== undefined ? Math.max(retryAfterTime, resetTime) : retryAfterTime ?? resetTime;
+  const retryAt = retryTime !== undefined && retryTime > now ? new Date(retryTime).toISOString() : undefined;
+  const wait = retryAt ? `请约 ${Math.ceil((retryTime! - now) / 1000)} 秒后重试。` : '请等待额度恢复后重试。';
+  const auth = authenticated ? '可检查所配置令牌的请求额度。' : '也可配置 GitHub 只读访问令牌，使用认证请求额度。';
+  return unavailable(currentVersion, `GitHub API 请求已被限流。${wait}${auth}`, { errorCode: 'rate-limited', ...(retryAt ? { retryAt } : {}) });
 }
 
 /** GitHub 的 404 同时可能表示无 Release 和私有仓库无访问权，不能当作“已是最新”。 */
@@ -77,8 +118,11 @@ export function releaseStatus(currentVersion: string, response: ReleaseResponse,
   if (response.status === 404) return unavailable(currentVersion, authenticated
     ? '未找到可访问的正式发布版本，请确认令牌有仓库读取权限，或稍后再试。'
     : '尚无正式发布版本，或仓库为私有。可配置 GitHub 令牌后重试。');
-  if (response.status === 401) return unavailable(currentVersion, 'GitHub 令牌无效或已过期，请重新配置。');
-  if (response.status === 403 || response.status === 429) return unavailable(currentVersion, 'GitHub 请求受限，请检查仓库访问权限或稍后重试。');
+  if (response.status === 401) return unavailable(currentVersion, 'GitHub 令牌无效或已过期，请重新配置。', { errorCode: 'unauthorized' });
+  if (rateLimitReason(response)) return limitedStatus(currentVersion, response, authenticated);
+  if (response.status === 403) return unavailable(currentVersion, authenticated
+    ? 'GitHub 拒绝访问（HTTP 403），未返回明确的限流信息。请检查令牌的仓库读取权限，或清除令牌后重试。'
+    : 'GitHub 拒绝访问（HTTP 403），未返回明确的限流信息。请检查访问权限或网络限制。', { errorCode: 'forbidden' });
   if (response.status !== 200) return unavailable(currentVersion, `无法检查更新（HTTP ${response.status}），请稍后重试。`);
   let release: Record<string, unknown>;
   try {
@@ -110,6 +154,15 @@ export async function requestLatestRelease(token?: string): Promise<ReleaseRespo
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     }, response => {
+      const headerNumber = (name: string, maximum: number) => {
+        const value = response.headers[name];
+        return typeof value === 'string' && /^\d{1,13}$/.test(value) ? boundedInteger(Number(value), maximum) : undefined;
+      };
+      const limits = {
+        rateLimitRemaining: headerNumber('x-ratelimit-remaining', 1_000_000_000),
+        rateLimitReset: headerNumber('x-ratelimit-reset', Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60),
+        retryAfter: headerNumber('retry-after', 7 * 24 * 60 * 60),
+      };
       let total = 0;
       const chunks: Buffer[] = [];
       response.on('data', (chunk: Buffer) => {
@@ -119,7 +172,7 @@ export async function requestLatestRelease(token?: string): Promise<ReleaseRespo
       });
       response.once('error', reject);
       response.once('aborted', () => reject(new Error('Release response interrupted')));
-      response.once('end', () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+      response.once('end', () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8'), ...limits }));
     });
     request.setTimeout(15_000, () => request.destroy(new Error('Release request timed out')));
     request.once('error', reject);
@@ -149,15 +202,19 @@ export class UpdateService {
   private async checkOnce(): Promise<UpdateStatus> {
     const started = Date.now();
     let phase: 'credentials' | 'request' = 'credentials';
+    let authenticated = false;
     this.writeCheckLog('updates.check.start', { currentVersion: this.currentVersion, phase });
     try {
       const token = await this.context.secrets.get(TOKEN_KEY);
+      authenticated = Boolean(token);
       phase = 'request';
       const response = await (this.options.request ?? requestLatestRelease)(token);
       const status = releaseStatus(this.currentVersion, response, Boolean(token));
       this.writeCheckLog('updates.check.result', {
         currentVersion: this.currentVersion, latestVersion: status.latestVersion, state: status.state,
-        httpStatus: response.status, phase, elapsedMs: Date.now() - started,
+        httpStatus: response.status, phase, elapsedMs: Date.now() - started, authenticated: Boolean(token),
+        reason: rateLimitReason(response) ?? status.errorCode,
+        ...rateLimitInfo(response),
       });
       return status;
     } catch (error) {
@@ -165,6 +222,7 @@ export class UpdateService {
       this.writeCheckLog('updates.check.failed', {
         currentVersion: this.currentVersion, state: 'unavailable', phase, elapsedMs: Date.now() - started,
         errorCode: checkErrorCode(error),
+        ...(phase === 'request' ? { authenticated } : {}),
       });
       // 网络和凭据错误只返回固定提示，不把可能包含请求信息的异常暴露给 Webview。
       return unavailable(this.currentVersion, '无法连接 GitHub，请检查网络连接后重试。');
@@ -243,7 +301,7 @@ export class UpdateService {
       const vscode = vscodeApi();
       return vscode.window.showInputBox({
         title: 'VSRead · GitHub 访问令牌', password: true, ignoreFocusOut: true,
-        prompt: '访问私有发布仓库时使用；令牌仅保存在 IDE 的 SecretStorage。需仓库 Contents 读取权限。',
+        prompt: '用于访问私有发布仓库或使用 GitHub 认证请求额度；令牌仅保存在 IDE 的 SecretStorage。私有仓库需 Contents 读取权限。',
         placeHolder: '输入 GitHub 个人访问令牌',
       });
     });

@@ -1,7 +1,9 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
+import https from 'node:https';
+import { EventEmitter } from 'node:events';
 import type * as vscode from 'vscode';
-import { compareVersions, releaseStatus, UpdateService, RELEASES_URL } from '../src/extension/updates';
+import { compareVersions, releaseStatus, requestLatestRelease, UpdateService, RELEASES_URL, LATEST_RELEASE_API } from '../src/extension/updates';
 import type { UpdateInstallResult } from '../src/shared/online';
 
 test('版本比较遵循 SemVer 数字、预发布及构建元数据顺序', () => {
@@ -30,6 +32,89 @@ test('无发布、私有无权、认证失败和限流不误报已是最新', ()
   for (const status of [401, 403, 404, 429, 500, 302]) assert.equal(releaseStatus('0.1.2', { status, body: '' }, false).state, 'unavailable');
   assert.match(releaseStatus('0.1.2', { status: 404, body: '' }, false).message, /私有/);
   assert.match(releaseStatus('0.1.2', { status: 404, body: '' }, true).message, /读取权限/);
+});
+
+test('主限流依据剩余额度和恢复时间提示等待，公开仓库令牌是可选项', () => {
+  const reset = Math.floor(Date.now() / 1000) + 120;
+  const response = { status: 403, body: 'private-response-value', rateLimitRemaining: 0, rateLimitReset: reset };
+  const anonymous = releaseStatus('0.1.12', response, false);
+  assert.equal(anonymous.state, 'unavailable');
+  assert.equal(anonymous.errorCode, 'rate-limited');
+  assert.equal(anonymous.retryAt, new Date(reset * 1000).toISOString());
+  assert.match(anonymous.message, /已被限流.*秒后重试/);
+  assert.match(anonymous.message, /也可配置.*只读/);
+  assert(!anonymous.message.includes('private-'));
+  const authenticated = releaseStatus('0.1.12', response, true);
+  assert.match(authenticated.message, /所配置令牌的请求额度/);
+  assert(!authenticated.message.includes('也可配置'));
+});
+
+test('二级限流与429识别明确，Retry-After 优先于一般额度重置时间', () => {
+  const started = Date.now();
+  const secondary = releaseStatus('0.1.12', {
+    status: 403, body: JSON.stringify({ message: 'You have exceeded a secondary rate limit. private-response-value' }),
+    rateLimitRemaining: 40, rateLimitReset: Math.floor(started / 1000) + 3600, retryAfter: 90,
+  }, false);
+  assert.equal(secondary.errorCode, 'rate-limited');
+  assert.match(secondary.message, /约 90 秒后重试/);
+  assert(Date.parse(secondary.retryAt!) >= started + 90_000);
+  assert(Date.parse(secondary.retryAt!) <= Date.now() + 90_000);
+  assert(!secondary.message.includes('private-'));
+  for (const response of [
+    { status: 429, body: '<html>private-response-value</html>' },
+    { status: 403, body: '{"message":"API rate limit exceeded for private-address-value"}' },
+  ]) {
+    const status = releaseStatus('0.1.12', response, false);
+    assert.equal(status.errorCode, 'rate-limited');
+    assert.match(status.message, /等待额度恢复/);
+    assert(!status.message.includes('private-'));
+  }
+});
+
+test('一般403不当成限流，畸形额度信息不能产生恢复时间或混入提示', () => {
+  const forbidden = releaseStatus('0.1.12', { status: 403, body: '{"message":"Resource not accessible by personal access token"}' }, true);
+  assert.equal(forbidden.errorCode, 'forbidden');
+  assert.match(forbidden.message, /拒绝访问.*未返回明确的限流信息/);
+  assert.match(forbidden.message, /清除令牌/);
+  for (const bad of [-1, NaN, Infinity, 'private-header-value', ['0']]) {
+    const response = { status: 403, body: '{}', rateLimitRemaining: bad, rateLimitReset: Number.MAX_SAFE_INTEGER, retryAfter: bad } as any;
+    const status = releaseStatus('0.1.12', response, false);
+    assert.equal(status.errorCode, 'forbidden');
+    assert.equal(status.retryAt, undefined);
+    assert(!status.message.includes('private-'));
+  }
+  const unauthorized = releaseStatus('0.1.12', { status: 401, body: 'private-response-value' }, true);
+  assert.equal(unauthorized.errorCode, 'unauthorized');
+  assert.match(unauthorized.message, /无效或已过期/);
+});
+
+test('网络响应只保留可用的限流数字头，拒绝数组、文本和过大时间', async () => {
+  const reset = Math.floor(Date.now() / 1000) + 120;
+  const headers = [
+    { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset), 'retry-after': '90', 'x-private-value': 'private-header-value' },
+    { 'x-ratelimit-remaining': '-1', 'x-ratelimit-reset': String(Number.MAX_SAFE_INTEGER), 'retry-after': ['90'], 'x-private-value': 'private-header-value' },
+  ];
+  const mocked = mock.method(https, 'get', ((_url: unknown, options: any, callback: (response: any) => void) => {
+    assert.equal(_url, LATEST_RELEASE_API);
+    assert.equal(options.headers.Authorization, undefined);
+    const request = new EventEmitter() as EventEmitter & { setTimeout(): unknown; destroy(error?: Error): void };
+    request.setTimeout = () => request;
+    request.destroy = error => { if (error) request.emit('error', error); };
+    queueMicrotask(() => {
+      const response = Object.assign(new EventEmitter(), { statusCode: 403, headers: headers.shift(), destroy() {} });
+      callback(response);
+      response.emit('data', Buffer.from('{"message":"API rate limit exceeded"}'));
+      response.emit('end');
+    });
+    return request;
+  }) as unknown as typeof https.get);
+  try {
+    const valid = await requestLatestRelease();
+    assert.equal(valid.rateLimitRemaining, 0); assert.equal(valid.rateLimitReset, reset); assert.equal(valid.retryAfter, 90);
+    assert(!JSON.stringify(valid).includes('private-header-value'));
+    const invalid = await requestLatestRelease();
+    assert.equal(invalid.rateLimitRemaining, undefined); assert.equal(invalid.rateLimitReset, undefined); assert.equal(invalid.retryAfter, undefined);
+  } finally { mocked.mock.restore(); }
 });
 
 test('令牌保留在 SecretStorage、检查可复用且打开固定仓库页面', async () => {
@@ -124,6 +209,7 @@ test('检查失败日志区分凭据与请求阶段，只记录受控错误码',
     assert.deepEqual(entries.map(entry => entry.event), ['updates.check.start', 'updates.check.failed']);
     assert.equal(entries[1].details?.phase, phase);
     assert.equal(entries[1].details?.errorCode, phase === 'request' ? 'ECONNRESET' : 'UNKNOWN');
+    assert.equal(entries[1].details?.authenticated, phase === 'request' ? true : undefined);
     assert.equal(typeof entries[1].details?.elapsedMs, 'number');
     assert(!JSON.stringify(entries).includes('private-'));
     assert(!JSON.stringify(entries).includes('Authorization'));
@@ -151,6 +237,25 @@ test('诊断输出异常不影响检查结果，HTTP 失败仍记录状态', asy
   assert.equal(entries[1].event, 'updates.check.result');
   assert.equal(entries[1].details?.httpStatus, 429);
   assert.equal(entries[1].details?.state, 'unavailable');
+  assert(!JSON.stringify(entries).includes('private-'));
+});
+
+test('限流日志保留受控原因和认证状态，不记录令牌或远端错误正文', async () => {
+  const entries: { event: string; details?: Record<string, unknown> }[] = [];
+  const reset = Math.floor(Date.now() / 1000) + 300;
+  const context = {
+    extension: { packageJSON: { version: '0.1.12' } }, secrets: { get: async () => 'private-access-value' },
+  } as unknown as vscode.ExtensionContext;
+  const updates = new UpdateService(context, {
+    log: (_level, event, details) => { entries.push({ event, details }); },
+    request: async () => ({ status: 403, body: '{"message":"private-response-value"}', rateLimitRemaining: 0, rateLimitReset: reset, retryAfter: 20 }),
+  });
+  assert.equal((await updates.check()).errorCode, 'rate-limited');
+  assert.equal(entries[1].details?.reason, 'primary-rate-limit');
+  assert.equal(entries[1].details?.authenticated, true);
+  assert.equal(entries[1].details?.rateLimitRemaining, 0);
+  assert.equal(entries[1].details?.rateLimitReset, reset);
+  assert.equal(entries[1].details?.retryAfter, 20);
   assert(!JSON.stringify(entries).includes('private-'));
 });
 
