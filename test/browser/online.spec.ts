@@ -685,3 +685,22 @@ test('全本缓存达到限额会暂停并提示清理，清理后可重新缓�
   await expect.poll(() => page.getByTestId('online-reading-surface').evaluate(node => node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight))).toBeGreaterThan(.395);
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
+
+test('在线章节快速滚动后立即从顶部返回书架仍保存最新位置', async ({ page }) => {
+  await openSavedOnlineBook(page, 0, .1, [0]);
+  await expect(page.locator('.online-reader .page-controls')).toContainText('进度已保存');
+  await page.evaluate(() => {
+    const surface = document.querySelector<HTMLElement>('[data-testid="online-reading-surface"]')!;
+    const maxScroll = Math.max(1, surface.scrollHeight - surface.clientHeight);
+    surface.scrollTop = Math.round(maxScroll * .8);
+    surface.dispatchEvent(new Event('scroll', { bubbles: true }));
+    // 在同一帧内直接触发顶部“我的书架”卸载阅读器，验证不丢失尚未进入 rAF 的新位置。
+    const shelfButton = document.querySelector<HTMLButtonElement>('.app-header button[aria-label="我的书架"]')!;
+    shelfButton.click();
+  });
+  await expect(page.getByRole('region', { name: '我的书架', exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('online-fixture') ?? '{}');
+    return saved.books?.[0]?.progress?.scroll ?? 0;
+  })).toBeGreaterThan(.75);
+});

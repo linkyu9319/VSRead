@@ -48,7 +48,6 @@ export function OnlineReader(props: Props) {
   const scrollFrame = useRef(0);
   const writer = useRef<OnlineProgressWriter | undefined>(undefined);
   latest.current = props;
-  bookRef.current = book;
   if (!writer.current) writer.current = new OnlineProgressWriter(
     value => request('online.progress', { id: props.book.id, ...value }),
     error => {
@@ -59,17 +58,29 @@ export function OnlineReader(props: Props) {
     },
   );
 
-  const remember = useCallback((value: ChapterPosition) => {
+  const syncPositionUi = useCallback((value: ChapterPosition) => {
     if (!active.current) return;
-    lastPosition.current = value;
     setPosition(value);
     setSaveState('正在保存…');
+  }, []);
+  const remember = useCallback((value: ChapterPosition, immediateUi = true) => {
+    if (!active.current) return;
+    lastPosition.current = value;
     writer.current!.put(value);
     const progress = { ...value, updatedAt: new Date().toISOString() };
     bookRef.current = { ...bookRef.current, progress };
-  }, []);
-  const capture = useCallback(() => {
-    cancelAnimationFrame(scrollFrame.current);
+    if (immediateUi) {
+      cancelAnimationFrame(scrollFrame.current);
+      scrollFrame.current = 0;
+      syncPositionUi(value);
+    } else if (!scrollFrame.current) {
+      scrollFrame.current = requestAnimationFrame(() => {
+        scrollFrame.current = 0;
+        syncPositionUi(lastPosition.current);
+      });
+    }
+  }, [syncPositionUi]);
+  const sample = useCallback((immediateUi: boolean) => {
     const node = viewport.current;
     if (!node || !readable.current) return;
     const size = viewportSize.current;
@@ -78,12 +89,10 @@ export function OnlineReader(props: Props) {
       node.scrollTo({ top: lastPosition.current.scroll * Math.max(0, node.scrollHeight - node.clientHeight), behavior: 'instant' });
     }
     viewportSize.current = { width: node.clientWidth, height: node.clientHeight };
-    remember({ chapter: shownChapter.current, scroll: Math.min(1, Math.max(0, node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight))) });
+    remember({ chapter: shownChapter.current, scroll: Math.min(1, Math.max(0, node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight))) }, immediateUi);
   }, [remember]);
-  const onScroll = useCallback(() => {
-    cancelAnimationFrame(scrollFrame.current);
-    scrollFrame.current = requestAnimationFrame(() => capture());
-  }, [capture]);
+  const capture = useCallback(() => sample(true), [sample]);
+  const onScroll = useCallback(() => sample(false), [sample]);
 
   useEffect(() => registerProgressFlusher(async () => { capture(); await writer.current!.flush(); }), [capture]);
 
@@ -158,6 +167,7 @@ export function OnlineReader(props: Props) {
     return () => {
       // 离开时只发送此前捕获的快照，不依赖已移除节点的尺寸。
       cancelAnimationFrame(scrollFrame.current);
+      scrollFrame.current = 0;
       active.current = false;
       readable.current = false;
       generation.current++;

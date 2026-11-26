@@ -146,40 +146,48 @@ export function releaseStatus(currentVersion: string, response: ReleaseResponse,
 
 /** 固定 GitHub API 主机，不跟随重定向，私有仓库令牌不会被转发到其他站点。 */
 export async function requestLatestRelease(token?: string, signal?: AbortSignal): Promise<ReleaseResponse> {
-  signal?.throwIfAborted();
-  const timeout = AbortSignal.timeout(15_000);
-  const effectiveSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  return new Promise((resolve, reject) => {
-    const request = https.get(LATEST_RELEASE_API, {
-      signal: effectiveSignal,
-      headers: {
-        Accept: 'application/vnd.github+json', 'User-Agent': 'VSRead-version-check',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-    }, response => {
-      const headerNumber = (name: string, maximum: number) => {
-        const value = response.headers[name];
-        return typeof value === 'string' && /^\d{1,13}$/.test(value) ? boundedInteger(Number(value), maximum) : undefined;
-      };
-      const limits = {
-        rateLimitRemaining: headerNumber('x-ratelimit-remaining', 1_000_000_000),
-        rateLimitReset: headerNumber('x-ratelimit-reset', Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60),
-        retryAfter: headerNumber('retry-after', 7 * 24 * 60 * 60),
-      };
-      let total = 0;
-      const chunks: Buffer[] = [];
-      response.on('data', (chunk: Buffer) => {
-        total += chunk.length;
-        if (total > MAX_RESPONSE_BYTES) { response.destroy(); request.destroy(new Error('Release response too large')); return; }
-        chunks.push(chunk);
+  if (signal?.aborted) throw signal.reason ?? Object.assign(new Error('Release request aborted'), { name: 'AbortError' });
+  // 兼容 VS Code 1.85（Node 18.15），避免依赖 Node 18.17+ 才提供的 AbortSignal.any。
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error('Release request timed out')), 15_000);
+  try {
+    return await new Promise<ReleaseResponse>((resolve, reject) => {
+      const request = https.get(LATEST_RELEASE_API, {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/vnd.github+json', 'User-Agent': 'VSRead-version-check',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      }, response => {
+        const headerNumber = (name: string, maximum: number) => {
+          const value = response.headers[name];
+          return typeof value === 'string' && /^\d{1,13}$/.test(value) ? boundedInteger(Number(value), maximum) : undefined;
+        };
+        const limits = {
+          rateLimitRemaining: headerNumber('x-ratelimit-remaining', 1_000_000_000),
+          rateLimitReset: headerNumber('x-ratelimit-reset', Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60),
+          retryAfter: headerNumber('retry-after', 7 * 24 * 60 * 60),
+        };
+        let total = 0;
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => {
+          total += chunk.length;
+          if (total > MAX_RESPONSE_BYTES) { response.destroy(); request.destroy(new Error('Release response too large')); return; }
+          chunks.push(chunk);
+        });
+        response.once('error', reject);
+        response.once('aborted', () => reject(new Error('Release response interrupted')));
+        response.once('end', () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8'), ...limits }));
       });
-      response.once('error', reject);
-      response.once('aborted', () => reject(new Error('Release response interrupted')));
-      response.once('end', () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8'), ...limits }));
+      request.setTimeout(15_000, () => request.destroy(new Error('Release request timed out')));
+      request.once('error', reject);
     });
-    request.setTimeout(15_000, () => request.destroy(new Error('Release request timed out')));
-    request.once('error', reject);
-  });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
 }
 
 export class UpdateService {

@@ -149,6 +149,11 @@ test('刷新目录会清理已移除章节的孤儿缓存文件与索引配额',
     await library.chapter(book.id, 0);
     await library.chapter(book.id, 1);
     removed = true;
+    const obstruction = path.join(root, 'online.json.tmp');
+    await mkdir(obstruction);
+    await assert.rejects(library.open(book.id, true));
+    assert.equal((await library.chapter(book.id, 0)).cached, true, '索引写盘失败时不得提前删除旧章节缓存');
+    await rm(obstruction, { recursive: true });
     const refreshed = await library.open(book.id, true);
     assert.deepEqual(refreshed.cachedChapters, [0]);
     await library.flush();

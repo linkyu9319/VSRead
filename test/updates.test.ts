@@ -329,3 +329,38 @@ test('一键更新在获取发布信息阶段收到取消信号会立即中止�
   assert.equal(observedSignal, controller.signal);
   assert.equal(result.state, 'cancelled');
 });
+
+test('requestLatestRelease 在缺少 AbortSignal.any 的 Node 18 宿主机上仍可正常请求与取消', async () => {
+  const originalAny = (AbortSignal as { any?: unknown }).any;
+  Object.defineProperty(AbortSignal, 'any', { value: undefined, configurable: true, writable: true });
+  const mocked = mock.method(https, 'get', ((_url: unknown, options: any, callback: (response: any) => void) => {
+    const request = new EventEmitter() as EventEmitter & { setTimeout(): unknown; destroy(error?: Error): void };
+    request.setTimeout = () => request;
+    request.destroy = error => { if (error) request.emit('error', error); };
+    const onAbort = () => request.emit('error', options.signal.reason ?? new Error('aborted'));
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options.headers?.Authorization === 'Bearer abort-me') {
+      queueMicrotask(() => options.signal?.aborted || undefined);
+      return request;
+    }
+    queueMicrotask(() => {
+      const response = Object.assign(new EventEmitter(), { statusCode: 200, headers: {}, destroy() {} });
+      callback(response);
+      response.emit('data', Buffer.from('{"tag_name":"v0.2.4"}'));
+      response.emit('end');
+    });
+    return request;
+  }) as unknown as typeof https.get);
+  try {
+    const okController = new AbortController();
+    const ok = await requestLatestRelease('ok-token', okController.signal);
+    assert.equal(ok.status, 200);
+    const cancelController = new AbortController();
+    const pending = requestLatestRelease('abort-me', cancelController.signal);
+    cancelController.abort(new Error('user-cancelled'));
+    await assert.rejects(pending, /user-cancelled|aborted/);
+  } finally {
+    mocked.mock.restore();
+    Object.defineProperty(AbortSignal, 'any', { value: originalAny, configurable: true, writable: true });
+  }
+});

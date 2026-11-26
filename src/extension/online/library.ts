@@ -191,7 +191,22 @@ export class OnlineLibrary {
     return this.withBookExclusive(id, async () => {
       if (refresh && this.cacheAllActive(id)) throw new Error('正在缓存全本，请先取消缓存后再刷新目录');
       const book = this.book(id);
-      if (refresh || !book.chapters.length) { await this.refreshToc(book, this.source(book.sourceId, true)); await this.save(); }
+      if (refresh || !book.chapters.length) {
+        const previous = {
+          chapters: book.chapters, progress: book.progress, title: book.title, author: book.author,
+          cacheSizes: { ...book.cacheSizes }, cachedChapters: [...book.cachedChapters],
+        };
+        const staleIds = await this.refreshToc(book, this.source(book.sourceId, true));
+        try { await this.save(); }
+        catch (error) {
+          // 先提交索引再删除旧正文；写盘失败时回滚内存并完整保留离线缓存。
+          Object.assign(book, previous);
+          throw error;
+        }
+        for (const staleId of staleIds) {
+          await rm(path.join(this.root, 'cache', book.id, staleId + '.txt'), { force: true }).catch(() => undefined);
+        }
+      }
       return this.publicBook(book);
     });
   }
@@ -490,7 +505,7 @@ export class OnlineLibrary {
   }
   private cacheFile(book: StoredBook, chapter: OnlineChapter): string { return path.join(this.root, 'cache', book.id, chapter.id + '.txt'); }
   private syncCached(book: StoredBook): void { book.cachedChapters = book.chapters.flatMap((chapter, index) => book.cacheSizes[chapter.id] === undefined ? [] : [index]); }
-  private async refreshToc(book: StoredBook, source: BookSource): Promise<void> {
+  private async refreshToc(book: StoredBook, source: BookSource): Promise<string[]> {
     const response = await this.request(resolveSourceUrl(source, book.url), undefined, { operation: 'book-info', source: source.name });
     let document = this.parsePage(source, response, 'book-info');
     const info = document.scope(source.bookInfo?.init);
@@ -527,13 +542,11 @@ export class OnlineLibrary {
     book.chapters = chapters;
     const validIds = new Set(chapters.map(chapter => chapter.id));
     const staleIds = Object.keys(book.cacheSizes).filter(chapterId => !validIds.has(chapterId));
-    for (const staleId of staleIds) {
-      delete book.cacheSizes[staleId];
-      await rm(path.join(this.root, 'cache', book.id, staleId + '.txt'), { force: true }).catch(() => undefined);
-    }
+    for (const staleId of staleIds) delete book.cacheSizes[staleId];
     if (title) book.title = title.slice(0, 300);
     if (author) book.author = author.slice(0, 300);
     this.syncCached(book);
+    return staleIds;
   }
   private async fetchChapter(book: StoredBook, chapter: OnlineChapter): Promise<OnlineChapterContent> {
     const source = this.source(book.sourceId, true);
