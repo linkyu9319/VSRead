@@ -22,6 +22,20 @@ export function pinnedLookup(address: { address: string; family: number } | { ad
   };
 }
 
+function expandIpv6(address: string): number[] | undefined {
+  if (address.includes('.')) return undefined;
+  const halves = address.split('::');
+  if (halves.length > 2) return undefined;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves[1] ? halves[1].split(':') : [];
+  if (halves.length === 1 && left.length !== 8) return undefined;
+  if (halves.length === 2 && left.length + right.length >= 8) return undefined;
+  const missing = halves.length === 2 ? 8 - left.length - right.length : 0;
+  const parts = [...left, ...Array(missing).fill('0'), ...right];
+  if (parts.length !== 8 || parts.some(part => !/^[0-9a-f]{1,4}$/.test(part))) return undefined;
+  return parts.map(part => parseInt(part, 16));
+}
+
 export function publicAddress(address: string): boolean {
   const value = address.toLowerCase().replace(/^\[|\]$/g, '');
   if (isIP(value) === 4) {
@@ -31,8 +45,14 @@ export function publicAddress(address: string): boolean {
       && !(a === 100 && b >= 64 && b <= 127) && !(a === 198 && (b === 18 || b === 19));
   }
   if (isIP(value) === 6) {
-    // 仅允许全局单播；映射、隧道和文档地址不会借由 IPv6 绕过私网限制。
-    return /^[23][0-9a-f]{3}:/.test(value) && !value.startsWith('2001:db8:') && !value.startsWith('2002:');
+    // 仅允许全局单播 2000::/3；显式排除文档、Teredo、ORCHID、6to4 与 IPv4 映射地址。
+    const segments = expandIpv6(value);
+    if (!segments) return false;
+    const [first, second] = segments;
+    if (first < 0x2000 || first > 0x3fff) return false;
+    if (first === 0x2002) return false;
+    if (first === 0x2001 && (second === 0x0db8 || second === 0x0000 || (second & 0xfff0) === 0x0010 || (second & 0xfff0) === 0x0020)) return false;
+    return true;
   }
   return false;
 }
@@ -141,12 +161,13 @@ export const requestText: TextFetcher = async (input, options = {}) => {
       stage = 'decode';
       const declared = result.charset || /<meta[^>]+charset\s*=\s*["']?([^\s"'/>;]+)/i.exec(bytes.subarray(0, 4096).toString('ascii'))?.[1];
       let charset = declared?.toLowerCase();
+      let decoded: string | undefined;
       if (!charset) {
-        try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); charset = 'utf-8'; }
+        try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes); charset = 'utf-8'; }
         catch { charset = 'gb18030'; }
       }
-      if (!iconv.encodingExists(charset)) throw new Error(`不支持的网页编码：${charset}`);
-      const text = iconv.decode(bytes, charset).replace(/^\uFEFF/, '');
+      if (!decoded && !iconv.encodingExists(charset)) throw new Error(`不支持的网页编码：${charset}`);
+      const text = (decoded ?? iconv.decode(bytes, charset)).replace(/^\uFEFF/, '');
       trace('complete', { bytes: bytes.length, charset });
       return { text, url: url.href };
     }

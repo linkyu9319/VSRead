@@ -23,7 +23,11 @@ function selectorPart(value: string): string {
   });
 }
 
+const parsedRules = new Map<string, Readonly<{ selector: string; attribute: string }>>();
+
 export function parseRule(rule: string): { selector: string; attribute: string } {
+  const cached = parsedRules.get(rule);
+  if (cached) return { ...cached };
   if (rule.length > 4096 || /@js:|<\/?js>|javascript:|\$\.|\{\{|\|\||&&|##|^\s*\//i.test(rule)) throw new Error('仅支持声明式 HTML / CSS 规则，不支持脚本、JSONPath、XPath 或规则表达式');
   const parts = rule.split('@');
   let attribute = 'text';
@@ -33,7 +37,10 @@ export function parseRule(rule: string): { selector: string; attribute: string }
   }
   const selector = selectorPart(parts.filter(Boolean).join(' ').trim());
   try { if (selector) load('<div></div>')(selector); } catch { throw new Error(`无效的 CSS 选择器：${selector}`); }
-  return { selector, attribute };
+  const result = { selector, attribute };
+  parsedRules.set(rule, result);
+  if (parsedRules.size > 512) parsedRules.delete(parsedRules.keys().next().value!);
+  return { ...result };
 }
 
 /** 独立实现 Legado 字段映射，不加载上游脚本引擎或执行书源内代码。 */
@@ -116,7 +123,7 @@ export function extract($: CheerioAPI, context: Cheerio<AnyNode>, rule: string |
   const clone = selected.clone();
   clone.find('script,style,noscript,iframe,object,embed,input,button,textarea,select,nav,header,footer').remove();
   clone.find('br').replaceWith('\n');
-  clone.find('p,div,li,section,article,h1,h2,h3,blockquote').each((_index, node) => { $(node).append('\n'); });
+  clone.find('p,div,li,section,article,h1,h2,h3,h4,h5,h6,blockquote').each((_index, node) => { $(node).append('\n'); });
   return clone.text().replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 export function resolveSourceUrl(source: BookSource, input: string, base = source.baseUrl): string {

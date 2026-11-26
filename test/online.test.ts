@@ -129,7 +129,33 @@ test('网络层拒绝本地、私网、URL凭据和非HTTP协议', async () => {
   for (const url of ['file:///etc/passwd', 'https://user:password@example.com', 'http://localhost:3306', 'http://127.0.0.1', 'http://2130706433', 'http://[::1]', 'http://[::ffff:127.0.0.1]', 'http://169.254.169.254', 'http://10.1.2.3']) assert.throws(() => validateHttpUrl(url), url);
   assert(publicAddress('8.8.8.8')); assert(publicAddress('2606:4700:4700::1111'));
   assert(!publicAddress('192.168.1.1')); assert(!publicAddress('100.64.1.1')); assert(!publicAddress('fd00::1')); assert(!publicAddress('2001:db8::1'));
+  assert(!publicAddress('2001:0db8::1')); assert(!publicAddress('2001::1')); assert(!publicAddress('2001:0:4136:e378::1'));
+  assert(!publicAddress('2001:10::1')); assert(!publicAddress('2001:20::1')); assert(!publicAddress('2002:7f00:1::1'));
   await assert.rejects(requestText('http://127.0.0.1:1'), /不允许/);
+});
+
+test('刷新目录会清理已移除章节的孤儿缓存文件与索引配额', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vsread-online-orphan-'));
+  let removed = false;
+  const fetchText: TextFetcher = async url => {
+    if (url.endsWith('/book/1')) return { url, text: removed ? '<a class="chapter" href="/chapter/2">第二章</a>' : '<a class="chapter" href="/chapter/1">第一章</a><a class="chapter" href="/chapter/2">第二章</a>' };
+    return { url, text: `<article id="content">正文 ${url}</article>` };
+  };
+  try {
+    const library = new OnlineLibrary(root, { fetchText }); await library.load();
+    const imported = await library.importSources({ json: JSON.stringify({ ...source, ruleBookInfo: {}, ruleToc: { chapterList: 'a.chapter', chapterName: '@text', chapterUrl: '@href' } }) });
+    const book = await library.add({ sourceId: imported.sources[0].id, title: '孤儿缓存测试', url: 'https://books.example.test/book/1' });
+    const oldChapterId = book.chapters[0].id;
+    await library.chapter(book.id, 0);
+    await library.chapter(book.id, 1);
+    removed = true;
+    const refreshed = await library.open(book.id, true);
+    assert.deepEqual(refreshed.cachedChapters, [0]);
+    await library.flush();
+    await assert.rejects(readFile(path.join(root, 'cache', book.id, oldChapterId + '.txt')), { code: 'ENOENT' });
+    const json = JSON.parse(await readFile(path.join(root, 'online.json'), 'utf8'));
+    assert.equal(json.books[0].cacheSizes[oldChapterId], undefined);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('加入和移除在线书籍写盘失败时，内存与缓存不会产生幽灵状态', async () => {

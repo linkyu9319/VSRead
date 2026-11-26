@@ -1,7 +1,11 @@
 type Token = string | number | '*';
 
+const parsedTokens = new Map<string, readonly Token[]>();
+
 /** 仅支持属性、数组下标与通配符；不执行 JSONPath 过滤表达式或脚本。 */
-function tokens(path: string): Token[] {
+function tokens(path: string): readonly Token[] {
+  const cached = parsedTokens.get(path);
+  if (cached) return cached;
   if (!path.startsWith('$') || path.length > 4096) throw new Error('JSON 规则必须以 $ 开头');
   const result: Token[] = [];
   let rest = path.slice(1);
@@ -15,6 +19,8 @@ function tokens(path: string): Token[] {
     else throw new Error('JSON 规则仅支持 $.字段、[下标] 和 [*]');
     if (result.length > 64) throw new Error('JSON 规则层级过深');
   }
+  parsedTokens.set(path, result);
+  if (parsedTokens.size > 512) parsedTokens.delete(parsedTokens.keys().next().value!);
   return result;
 }
 

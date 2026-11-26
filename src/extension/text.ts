@@ -3,16 +3,17 @@ import type { TextEncoding, TextIndex } from '../shared/model';
 
 export function decodeText(bytes: Buffer, requested: TextEncoding = 'auto'): { text: string; encoding: string } {
   let encoding: string = requested;
+  let decoded: string | undefined;
   if (requested === 'auto') {
     if (bytes[0] === 0xff && bytes[1] === 0xfe) encoding = 'utf-16le';
     else if (bytes[0] === 0xfe && bytes[1] === 0xff) encoding = 'utf-16be';
     else {
-      // GBK 是 GB18030 的子集；先严格验证 UTF-8，避免把中文遗留编码解成乱码。
-      try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); encoding = 'utf-8'; }
+      // GBK 是 GB18030 的子集；先严格验证 UTF-8，成功时直接复用解码结果，避免大文件二次解码。
+      try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes); encoding = 'utf-8'; }
       catch { encoding = 'gb18030'; }
     }
   }
-  const text = iconv.decode(bytes, encoding).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const text = (decoded ?? iconv.decode(bytes, encoding)).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
   if (!text.trim()) throw new Error('TXT 文件没有可阅读的内容');
   return { text, encoding };
 }

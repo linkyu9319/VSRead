@@ -160,7 +160,12 @@ async function main() {
         assert.match(online.error, /在线书库/);
         assert.equal(await fs.readFile(path.join(storage, 'online', 'online.json'), 'utf8'), damagedOnline);
         assert.equal(await fs.readFile(path.join(storage, 'online', 'online.backup.json'), 'utf8'), damagedOnline);
-      } else assert.deepEqual((await panel.rpc('online.list')).result, []);
+      } else {
+        assert.deepEqual((await panel.rpc('online.list')).result, []);
+        const cancelledImport = await panel.rpc('import');
+        assert.equal(cancelledImport.error, undefined);
+        assert.equal(cancelledImport.result.importedBookId, undefined);
+      }
     }
     await vscode.commands.executeCommand('vsread.openLogs');
     if (scenario !== 'damaged-online') {

@@ -9,6 +9,7 @@ import { LibraryStore } from './store';
 const ENCODINGS = new Set(['auto', 'utf-8', 'gb18030', 'utf-16le', 'utf-16be']);
 
 export class BookLibrary {
+  private textIndexCache = new Map<string, TextIndex>();
   constructor(readonly store: LibraryStore, private readonly workerPath: string) {}
 
   book(id: unknown): BookRecord {
@@ -71,11 +72,28 @@ export class BookLibrary {
         await stat(path.join(destination, 'index.json'));
       }
       book.encoding = index.encoding;
+      this.evictTextIndex(book.id);
+      this.cacheTextIndex(`${book.id}:${index.encoding}`, index);
       return index;
     } finally { await rm(staging, { recursive: true, force: true }); }
   }
+  evictTextIndex(bookId: string): void {
+    const prefix = `${bookId}:`;
+    for (const key of this.textIndexCache.keys()) if (key.startsWith(prefix)) this.textIndexCache.delete(key);
+  }
+  private cacheTextIndex(key: string, index: TextIndex): void {
+    this.textIndexCache.delete(key);
+    this.textIndexCache.set(key, index);
+    if (this.textIndexCache.size > 32) this.textIndexCache.delete(this.textIndexCache.keys().next().value!);
+  }
   async textIndex(book: BookRecord): Promise<TextIndex> {
-    return JSON.parse(await readFile(path.join(this.textDirectory(book), 'index.json'), 'utf8'));
+    const dir = this.textDirectory(book);
+    const key = `${book.id}:${book.encoding}`;
+    const cached = this.textIndexCache.get(key);
+    if (cached) return cached;
+    const parsed = JSON.parse(await readFile(path.join(dir, 'index.json'), 'utf8')) as TextIndex;
+    this.cacheTextIndex(key, parsed);
+    return parsed;
   }
   async text(book: BookRecord, partNumber: unknown): Promise<TextChunk> {
     if (book.format !== 'txt' || typeof partNumber !== 'number' || !Number.isSafeInteger(partNumber)) throw new Error('正文请求无效');

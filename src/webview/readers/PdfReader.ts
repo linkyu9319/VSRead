@@ -19,6 +19,7 @@ export class PdfReader implements ReaderAdapter {
   private textLayer?: TextLayer;
   private pageNumber = 1;
   private generation = 0;
+  private searchGeneration = 0;
   private destroyed = false;
   private rendering = false;
   private resize: ResizeObserver;
@@ -212,10 +213,13 @@ export class PdfReader implements ReaderAdapter {
   async search(query: string): Promise<SearchHit[]> {
     const pdf = this.document;
     if (!pdf || !query.trim()) return [];
+    const token = ++this.searchGeneration;
     const hits: SearchHit[] = [];
-    for (let i = 1; i <= pdf.numPages && hits.length < 100 && !this.destroyed; i++) {
-      const text = await this.pageText(await pdf.getPage(i));
-      if (this.destroyed) break;
+    for (let i = 1; i <= pdf.numPages && hits.length < 100 && !this.destroyed && token === this.searchGeneration; i++) {
+      const page = await pdf.getPage(i);
+      const text = await this.pageText(page);
+      if (![...this.pageCache.values()].some(item => item.page === page) && !this.preparedPages.has(i)) page.cleanup();
+      if (this.destroyed || token !== this.searchGeneration) break;
       const content = text.items.map(item => 'str' in item ? item.str : '').join(' ');
       const at = content.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
       if (at >= 0) hits.push({ id: String(i), label: `第 ${i} 页 · ${content.slice(Math.max(0, at - 20), at + 80)}` });
@@ -231,6 +235,7 @@ export class PdfReader implements ReaderAdapter {
     // 销毁 DOM 不重算位置；Worker 文档由有界会话缓存管理，画布则立即释放。
     this.destroyed = true;
     this.generation++;
+    this.searchGeneration++;
     this.resize.disconnect();
     clearTimeout(this.resizeTimer);
     clearTimeout(this.prefetchTimer);

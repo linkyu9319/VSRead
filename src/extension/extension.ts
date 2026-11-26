@@ -63,7 +63,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return { book, ...(book.format === 'txt' ? { textIndex: await library.textIndex(book) } : {}) };
   };
 
-  const importBooks = async (resource?: vscode.Uri) => {
+  const importBooks = async (resource?: vscode.Uri): Promise<string | undefined> => {
     requireLibrary();
     if (importing) throw new Error('正在导入，请稍候');
     // 资源管理器会传 URI；侧栏标题菜单可能传视图上下文，应走文件选择器。
@@ -71,8 +71,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       canSelectMany: true, openLabel: '导入到 VSRead',
       filters: { '电子书': ['epub', 'txt', 'pdf'] },
     });
-    if (!selected?.length) return;
+    if (!selected?.length) return undefined;
     importing = true;
+    let importedBookId: string | undefined;
     try {
       await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'VSRead · 正在导入本地书籍' }, async progress => {
         const failures: string[] = [];
@@ -82,16 +83,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             progress.report({ message: path.basename(uri.fsPath), increment: 100 / selected.length });
             const book = await library.importFile(uri.fsPath);
             libraryStore.data.lastBookId = book.id;
+            importedBookId = book.id;
           } catch (error) { failures.push(`${path.basename(uri.fsPath)}：${errorMessage(error)}`); }
         }
-        await libraryStore.save();
+        if (importedBookId) await libraryStore.save();
         if (failures.length) void vscode.window.showErrorMessage(failures.join('\n'));
       });
+      return importedBookId;
     } finally { importing = false; }
   };
 
   const configure = async (target: vscode.WebviewPanel) => {
+    if (panel && panel !== target) panel.dispose();
     panel = target;
+    let disposed = false;
+    const panelDisposables: vscode.Disposable[] = [];
+    const post = (payload: unknown) => {
+      if (disposed) return Promise.resolve(false);
+      return Promise.resolve(target.webview.postMessage(payload)).catch(() => false);
+    };
     const searches = new AggregateSearchManager(online);
     let singleSearch: AbortController | undefined;
     const stopSearches = () => { searches.cancelAll(); singleSearch?.abort(); };
@@ -103,13 +113,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'dist', 'webview')],
     };
     void vscode.commands.executeCommand('setContext', 'vsread.readerActive', target.active);
-    target.onDidChangeViewState(event => { void vscode.commands.executeCommand('setContext', 'vsread.readerActive', event.webviewPanel.active); }, null, context.subscriptions);
-    target.onDidDispose(() => {
-      stopSearches(); searchSessions.delete(stopSearches);
-      if (panel === target) { panel = undefined; void vscode.commands.executeCommand('setContext', 'vsread.readerActive', false); }
-    }, null, context.subscriptions);
+    panelDisposables.push(
+      target.onDidChangeViewState(event => { void vscode.commands.executeCommand('setContext', 'vsread.readerActive', event.webviewPanel.active); }),
+      target.onDidDispose(() => {
+        disposed = true;
+        stopSearches(); searchSessions.delete(stopSearches);
+        if (panel === target) { panel = undefined; void vscode.commands.executeCommand('setContext', 'vsread.readerActive', false); }
+        for (const disposable of panelDisposables.splice(0)) disposable.dispose();
+      }),
+    );
     // 所有 Webview 输入均视为不可信：只接受已导入书籍的 ID，从不接收文件路径。
-    target.webview.onDidReceiveMessage(async (message: unknown) => {
+    panelDisposables.push(target.webview.onDidReceiveMessage(async (message: unknown) => {
       if (!isRecord(message) || typeof message.id !== 'string' || message.id.length > 100 || typeof message.method !== 'string') return;
       const request = message as unknown as RpcRequest;
       const started = Date.now();
@@ -130,7 +144,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           case 'diagnostics.open': await openLogs(); break;
-          case 'import': await importBooks(); result = libraryStore.data; break;
+          case 'import': { const importedBookId = await importBooks(); result = { ...libraryStore.data, ...(importedBookId ? { importedBookId } : {}) }; break; }
           case 'open': result = await openBook(args.id); break;
           case 'text': result = await library.text(library.book(args.id), args.part); break;
           case 'binary': result = await library.binary(library.book(args.id), args.offset); break;
@@ -164,6 +178,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             if (answer === '移除') {
               libraryStore.data.books = libraryStore.data.books.filter(item => item.id !== book.id);
               if (libraryStore.data.lastBookId === book.id) libraryStore.data.lastBookId = undefined;
+              library.evictTextIndex(book.id);
               await libraryStore.save();
               await rm(library.directory(book), { recursive: true, force: true });
             }
@@ -219,12 +234,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           default: throw new Error('不支持的阅读器请求');
         }
         if (traced) log.write('info', 'rpc.complete', { method: request.method, requestId: request.id, elapsedMs: Date.now() - started });
-        await target.webview.postMessage({ id: request.id, result });
+        await post({ id: request.id, result });
       } catch (error) {
         log.write('error', 'rpc.failed', { method: request.method, requestId: request.id, elapsedMs: Date.now() - started, ...diagnosticError(error) });
-        await target.webview.postMessage({ id: request.id, error: errorMessage(error) });
+        await post({ id: request.id, error: errorMessage(error) });
       }
-    }, null, context.subscriptions);
+    }));
     target.webview.html = await renderWebview(target.webview, context.extensionUri);
   };
 
@@ -260,9 +275,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('vsread.clearUpdateToken', () => updates.auth('clear')),
     vscode.commands.registerCommand('vsread.import', async (resource?: vscode.Uri) => {
       try {
-        await importBooks(resource);
+        const importedBookId = await importBooks(resource);
+        if (!importedBookId) return;
         const target = await show();
-        await target.webview.postMessage({ event: 'library', library: libraryStore.data });
+        await target.webview.postMessage({ event: 'library', library: libraryStore.data, openBookId: importedBookId });
       } catch (error) { void vscode.window.showErrorMessage(errorMessage(error)); }
     }),
     vscode.window.registerWebviewPanelSerializer('vsread.reader', { deserializeWebviewPanel: async target => { await configure(target); } }),

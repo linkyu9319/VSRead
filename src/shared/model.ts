@@ -30,7 +30,7 @@ export interface BinaryChunk { base64: string; total: number }
 
 export interface Requests extends OnlineRequests {
   init: { args: undefined; result: Library & { initialView?: 'online'; initialFocus?: boolean } };
-  import: { args: undefined; result: Library };
+  import: { args: undefined; result: Library & { importedBookId?: string } };
   open: { args: { id: string }; result: OpenBook };
   text: { args: { id: string; part: number }; result: TextChunk };
   binary: { args: { id: string; offset: number }; result: BinaryChunk };

@@ -119,7 +119,8 @@ export function App() {
       if (event.data?.event !== 'library') return;
       const data = event.data.library as Library;
       setLibrary(data);
-      if (data.lastBookId) void open(data.lastBookId);
+      const nextBookId = typeof event.data.openBookId === 'string' ? event.data.openBookId : undefined;
+      if (nextBookId) void open(nextBookId);
     };
     const flush = () => { void writer.current!.flush(); };
     window.addEventListener('message', update);
@@ -134,7 +135,11 @@ export function App() {
 
   const importBooks = async () => {
     setBusy(true);
-    try { const data = await request('import', undefined); setLibrary(data); if (data.lastBookId) await open(data.lastBookId); }
+    try {
+      const { importedBookId, ...data } = await request('import', undefined);
+      setLibrary(data);
+      if (importedBookId) await open(importedBookId);
+    }
     catch (error) { reportError(error); }
     finally { setBusy(false); }
   };

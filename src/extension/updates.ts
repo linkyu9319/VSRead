@@ -30,7 +30,7 @@ interface ReleaseResponse {
 }
 export interface UpdateServiceOptions {
   log?: DiagnosticSink;
-  request?: (token: string | undefined) => Promise<ReleaseResponse>;
+  request?: (token: string | undefined, signal?: AbortSignal) => Promise<ReleaseResponse>;
   inputToken?: () => Promise<string | undefined>;
   openExternal?: (url: string) => Promise<boolean>;
   install?: typeof installUpdate;
@@ -145,10 +145,13 @@ export function releaseStatus(currentVersion: string, response: ReleaseResponse,
 }
 
 /** 固定 GitHub API 主机，不跟随重定向，私有仓库令牌不会被转发到其他站点。 */
-export async function requestLatestRelease(token?: string): Promise<ReleaseResponse> {
+export async function requestLatestRelease(token?: string, signal?: AbortSignal): Promise<ReleaseResponse> {
+  signal?.throwIfAborted();
+  const timeout = AbortSignal.timeout(15_000);
+  const effectiveSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   return new Promise((resolve, reject) => {
     const request = https.get(LATEST_RELEASE_API, {
-      signal: AbortSignal.timeout(15_000),
+      signal: effectiveSignal,
       headers: {
         Accept: 'application/vnd.github+json', 'User-Agent': 'VSRead-version-check',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -260,7 +263,7 @@ export class UpdateService {
     return run(async (signal, report) => {
       let response: ReleaseResponse;
       const token = await this.context.secrets.get(TOKEN_KEY);
-      try { response = await (this.options.request ?? requestLatestRelease)(token); }
+      try { response = await (this.options.request ?? requestLatestRelease)(token, signal); }
       catch { if (signal.aborted) return { state: 'cancelled', message: '已取消更新，当前版本保持不变。' }; throw new Error('无法连接 GitHub，请稍后重试或从发布页手动安装。'); }
       if (signal.aborted) return { state: 'cancelled', message: '已取消更新，当前版本保持不变。' };
       const status = releaseStatus(this.currentVersion, response, Boolean(token));

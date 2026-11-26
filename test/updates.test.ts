@@ -310,3 +310,22 @@ test('安装失败或取消后可重试，没有新版本及缺校验包时禁�
   }
   assert.equal(installs, 3);
 });
+
+test('一键更新在获取发布信息阶段收到取消信号会立即中止并返回已取消', async () => {
+  const controller = new AbortController();
+  let observedSignal: AbortSignal | undefined;
+  const updates = new UpdateService(installContext(), {
+    withProgress: task => task(controller.signal, () => {}),
+    request: async (_token, signal) => {
+      observedSignal = signal;
+      return await new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        controller.abort();
+      });
+    },
+    install: async () => { assert.fail('取消后不应继续下载安装'); },
+  });
+  const result = await updates.install();
+  assert.equal(observedSignal, controller.signal);
+  assert.equal(result.state, 'cancelled');
+});

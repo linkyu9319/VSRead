@@ -45,7 +45,8 @@ export class EpubReader implements ReaderAdapter {
       contents.document.addEventListener('keydown', this.onKeyDown);
       contents.document.addEventListener('click', event => {
         const target = (event.target as Element)?.closest('a');
-        if (target && /^(https?:|mailto:|file:|command:)/i.test(target.getAttribute('href') ?? '')) { event.preventDefault(); event.stopImmediatePropagation(); }
+        const href = (target?.getAttribute('href') ?? '').trim();
+        if (target && /^(?:https?:|mailto:|file:|command:|vscode(?:-insiders)?:|tel:|javascript:|vbscript:)/i.test(href)) { event.preventDefault(); event.stopImmediatePropagation(); }
       }, true);
     });
     rendition.on('relocated', (location: EpubLocation) => {
@@ -171,7 +172,7 @@ export class EpubReader implements ReaderAdapter {
     if (!style) {
       style = document.createElement('style');
       style.id = 'vsread-reader-style';
-      document.head.append(style);
+      (document.head ?? document.documentElement).append(style);
     }
     // 独立替换样式节点，避免 epub.js registerRules 在每次拖动字号时累积 CSS 规则。
     // 正文段落和 span 采用用户偏好，标题仍保留书籍自身的颜色与字号层次。

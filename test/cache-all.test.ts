@@ -175,3 +175,21 @@ test('缺失或空缓存文件会被重新获取，不计作全本已缓存', as
     assert.deepEqual(item.calls, [0, 1]);
   } finally { await terminal(item.library, item.book.id); await rm(item.root, { recursive: true, force: true }); }
 });
+
+test('全本缓存下载慢章时不阻塞同一本书已缓存章节的读取', async () => {
+  const entered = deferred(), release = deferred();
+  const item = await fixture(3, async index => { if (index === 1) { entered.resolve(); await release.promise; } return `正文 ${index}`; });
+  try {
+    await item.library.chapter(item.book.id, 0);
+    await item.library.startCacheAll(item.book.id);
+    await entered.promise;
+    const cached = await Promise.race([
+      item.library.chapter(item.book.id, 0),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('已缓存章节读取被后台下载阻塞')), 500)),
+    ]);
+    assert.equal(cached.cached, true);
+    assert.equal(cached.text, '正文 0');
+    release.resolve();
+    assert.equal((await terminal(item.library, item.book.id)).completed, 3);
+  } finally { release.resolve(); await terminal(item.library, item.book.id); await rm(item.root, { recursive: true, force: true }); }
+});

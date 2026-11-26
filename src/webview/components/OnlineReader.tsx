@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { ReaderSettings } from '../../shared/model';
 import type { CacheAllJob, OnlineBookRecord, OnlineChapterContent } from '../../shared/online';
@@ -45,6 +45,7 @@ export function OnlineReader(props: Props) {
   const restore = useRef(props.book.progress?.scroll ?? 0);
   const lastPosition = useRef<ChapterPosition>(position);
   const viewportSize = useRef({ width: 0, height: 0 });
+  const scrollFrame = useRef(0);
   const writer = useRef<OnlineProgressWriter | undefined>(undefined);
   latest.current = props;
   bookRef.current = book;
@@ -54,6 +55,7 @@ export function OnlineReader(props: Props) {
       if (!active.current) return;
       setSaveState(error ? '保存失败 · 下次操作重试' : '进度已保存');
       if (error) latest.current.onError(error);
+      else latest.current.onBookChange(bookRef.current);
     },
   );
 
@@ -65,10 +67,9 @@ export function OnlineReader(props: Props) {
     writer.current!.put(value);
     const progress = { ...value, updatedAt: new Date().toISOString() };
     bookRef.current = { ...bookRef.current, progress };
-    setBook(bookRef.current);
-    latest.current.onBookChange(bookRef.current);
   }, []);
   const capture = useCallback(() => {
+    cancelAnimationFrame(scrollFrame.current);
     const node = viewport.current;
     if (!node || !readable.current) return;
     const size = viewportSize.current;
@@ -79,6 +80,10 @@ export function OnlineReader(props: Props) {
     viewportSize.current = { width: node.clientWidth, height: node.clientHeight };
     remember({ chapter: shownChapter.current, scroll: Math.min(1, Math.max(0, node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight))) });
   }, [remember]);
+  const onScroll = useCallback(() => {
+    cancelAnimationFrame(scrollFrame.current);
+    scrollFrame.current = requestAnimationFrame(() => capture());
+  }, [capture]);
 
   useEffect(() => registerProgressFlusher(async () => { capture(); await writer.current!.flush(); }), [capture]);
 
@@ -152,9 +157,11 @@ export function OnlineReader(props: Props) {
     document.addEventListener('visibilitychange', flush);
     return () => {
       // 离开时只发送此前捕获的快照，不依赖已移除节点的尺寸。
+      cancelAnimationFrame(scrollFrame.current);
       active.current = false;
       readable.current = false;
       generation.current++;
+      latest.current.onBookChange(bookRef.current);
       void writer.current!.flush();
       window.removeEventListener('pagehide', flush);
       document.removeEventListener('visibilitychange', flush);
@@ -195,8 +202,8 @@ export function OnlineReader(props: Props) {
     return () => window.removeEventListener('keydown', keydown);
   }, [capture, turn]);
 
-  const synchronizeBook = (next: OnlineBookRecord) => {
-    const updated = { ...next, progress: bookRef.current.progress ?? next.progress };
+  const synchronizeBook = (next: OnlineBookRecord, preserveProgress = true) => {
+    const updated = { ...next, progress: preserveProgress ? (bookRef.current.progress ?? next.progress) : next.progress };
     bookRef.current = updated;
     setBook(updated);
     latest.current.onBookChange(updated);
@@ -230,12 +237,17 @@ export function OnlineReader(props: Props) {
     if (!active.current) return;
     const index = Math.max(0, next.chapters.findIndex(item => item.id === previous?.id || item.url === previous?.url));
     readable.current = false;
-    synchronizeBook(next);
+    synchronizeBook(next, false);
     if (!next.chapters.length) { setMessage('更新后的目录为空，已保留当前显示的正文'); return; }
     await loadChapter(index, next.chapters[index]?.id === previous?.id ? previousScroll : 0);
     if (active.current) setMessage(`目录已更新，共 ${next.chapters.length} 章`);
     });
   };
+  const cachedChapterSet = useMemo(() => new Set(book.cachedChapters), [book.cachedChapters]);
+  const filteredChapters = useMemo(() => {
+    const needle = filter.toLocaleLowerCase();
+    return book.chapters.map((chapter, index) => ({ chapter, index })).filter(({ chapter }) => !needle || chapter.title.toLocaleLowerCase().includes(needle));
+  }, [book.chapters, filter]);
   const percentage = book.chapters.length ? (position.chapter + position.scroll) / book.chapters.length : 0;
   const textStyle: CSSProperties = {
     fontSize: `${props.settings.fontSize}px`, lineHeight: props.settings.lineHeight,
@@ -254,8 +266,8 @@ export function OnlineReader(props: Props) {
       if (active.current) { synchronizeBook(next); setCacheRefresh(value => value + 1); setMessage('离线缓存已清除，当前已显示章节仍可阅读'); }
     })}>清除缓存</button>{task && <span className="online-inline-status" role="status">{task}中…</span>}<CacheAllControls book={book} busy={!!task} refreshVersion={cacheRefresh} onStatus={applyCacheStatus} onBusyChange={setCacheAllBusy} onError={props.onError} /></div>
     {message && <p className="online-message" role="status">{message}{!content && !loading && <button className="text-button" onClick={() => void loadChapter(targetChapter.current, restore.current)}>重试</button>}</p>}
-    <div className="online-reader-body">{tocVisible && <aside className="online-toc" aria-label="在线章节目录"><div className="filter-field"><Icon name="search" size={15} /><input aria-label="筛选在线章节" placeholder="查找章节…" value={filter} onChange={event => setFilter(event.target.value)} /></div><nav>{book.chapters.map((chapter, index) => ({ chapter, index })).filter(({ chapter }) => chapter.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase())).map(({ chapter, index }) => <button key={chapter.id} className={index === chapterIndex && content ? 'active' : ''} onClick={() => void loadChapter(index)} title={chapter.title}><span>{chapter.title}</span>{book.cachedChapters.includes(index) && <Icon name="check" size={12} />}</button>)}</nav></aside>}
-      <div className="online-reading-stage"><div key={content?.chapter.id ?? 'empty'} ref={viewport} className="online-reading-surface" style={{ overflowAnchor: 'none' }} tabIndex={0} aria-label="在线章节正文" onScroll={capture} data-testid="online-reading-surface">{content && <article className="online-chapter-content" style={textStyle}><h3>{content.chapter.title}</h3><div>{content.text}</div></article>}</div>{loading && <div className={`online-loading ${content ? 'online-loading-small' : ''}`} role="status"><span className="spinner" />正在读取章节…</div>}{!loading && !content && <div className="online-no-content"><Icon name="book" size={30} /><p>选择章节开始阅读</p></div>}</div>
+    <div className="online-reader-body">{tocVisible && <aside className="online-toc" aria-label="在线章节目录"><div className="filter-field"><Icon name="search" size={15} /><input aria-label="筛选在线章节" placeholder="查找章节…" value={filter} onChange={event => setFilter(event.target.value)} /></div><nav>{filteredChapters.map(({ chapter, index }) => <button key={chapter.id} className={index === chapterIndex && content ? 'active' : ''} onClick={() => void loadChapter(index)} title={chapter.title}><span>{chapter.title}</span>{cachedChapterSet.has(index) && <Icon name="check" size={12} />}</button>)}</nav></aside>}
+      <div className="online-reading-stage"><div key={content?.chapter.id ?? 'empty'} ref={viewport} className="online-reading-surface" style={{ overflowAnchor: 'none' }} tabIndex={0} aria-label="在线章节正文" onScroll={onScroll} data-testid="online-reading-surface">{content && <article className="online-chapter-content" style={textStyle}><h3>{content.chapter.title}</h3><div>{content.text}</div></article>}</div>{loading && <div className={`online-loading ${content ? 'online-loading-small' : ''}`} role="status"><span className="spinner" />正在读取章节…</div>}{!loading && !content && <div className="online-no-content"><Icon name="book" size={30} /><p>选择章节开始阅读</p></div>}</div>
     </div>
     <div className="page-controls"><button className="text-button" disabled={loading || chapterIndex <= 0} onClick={() => turn(-1)}><Icon name="left" size={16} />上一章</button><span>{content?.cached ? '离线缓存' : content ? '正文已缓存' : ''} · {saveState} · {formatPercentage(percentage)}</span><button className="text-button" disabled={loading || chapterIndex >= book.chapters.length - 1} onClick={() => turn(1)}>下一章<Icon name="right" size={16} /></button></div>
   </section>;

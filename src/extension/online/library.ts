@@ -14,6 +14,10 @@ interface CacheAllTask {
   state: CacheAllJob['state']; cancelRequested: boolean; failedIds: Set<string>;
   currentChapter?: number; error?: string; done: Promise<void>; wake?(): void;
 }
+interface BookLockState {
+  activeReaders: number; writerActive: boolean;
+  waitingReaders: (() => void)[]; waitingWriters: (() => void)[];
+}
 const MAX_CACHE_BYTES = 200 * 1024 * 1024;
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -24,7 +28,8 @@ export class OnlineLibrary {
   private network = new Map<string, Promise<void>>();
   private fetchText: TextFetcher;
   private activeChapters = new Map<string, Promise<OnlineChapterContent>>();
-  private bookOperations = new Map<string, Promise<unknown>>();
+  private bookLocks = new Map<string, BookLockState>();
+  private chapterOperations = new Map<string, Promise<unknown>>();
   private cacheWrites = Promise.resolve();
   private sourceOperations = Promise.resolve();
   private cacheAllTasks = new Map<string, CacheAllTask>();
@@ -160,7 +165,7 @@ export class OnlineLibrary {
     const source = this.source(result.sourceId, true);
     const url = resolveSourceUrl(source, result.url);
     const id = stableId(source.id + '\n' + url);
-    return this.withBook(id, async () => {
+    return this.withBookExclusive(id, async () => {
       const existing = this.state.books.find(book => book.id === id);
       if (existing) return this.publicBook(existing);
       if (this.state.books.length >= 200) throw new Error('在线书架最多保存 200 本书');
@@ -179,15 +184,19 @@ export class OnlineLibrary {
   }
   async open(id: string, refresh = false): Promise<OnlineBookRecord> {
     if (refresh && this.cacheAllActive(id)) throw new Error('正在缓存全本，请先取消缓存后再刷新目录');
-    return this.withBook(id, async () => {
-    if (refresh && this.cacheAllActive(id)) throw new Error('正在缓存全本，请先取消缓存后再刷新目录');
-    const book = this.book(id);
-    if (refresh || !book.chapters.length) { await this.refreshToc(book, this.source(book.sourceId, true)); await this.save(); }
-    return this.publicBook(book);
+    const existing = !refresh ? this.state.books.find(book => book.id === id) : undefined;
+    if (!refresh && existing?.chapters.length) {
+      return this.withBookShared(id, async () => this.publicBook(this.book(id)));
+    }
+    return this.withBookExclusive(id, async () => {
+      if (refresh && this.cacheAllActive(id)) throw new Error('正在缓存全本，请先取消缓存后再刷新目录');
+      const book = this.book(id);
+      if (refresh || !book.chapters.length) { await this.refreshToc(book, this.source(book.sourceId, true)); await this.save(); }
+      return this.publicBook(book);
     });
   }
   async chapter(id: string, number: number, refresh = false): Promise<OnlineChapterContent> {
-    return this.withBook(id, () => this.chapterData(id, number, refresh));
+    return this.withBookShared(id, () => this.withChapter(id, number, () => this.chapterData(id, number, refresh)));
   }
   private async chapterData(id: string, number: number, refresh: boolean): Promise<OnlineChapterContent> {
     const book = this.book(id);
@@ -299,7 +308,7 @@ export class OnlineLibrary {
     }
   }
   private cacheAllChapter(id: string, index: number, task: CacheAllTask): Promise<boolean> {
-    return this.withBook(id, async () => {
+    return this.withBookShared(id, () => this.withChapter(id, index, async () => {
       if (task.cancelRequested) return false;
       const book = this.book(id), chapter = book.chapters[index];
       const expectedSize = book.cacheSizes[chapter.id];
@@ -308,7 +317,7 @@ export class OnlineLibrary {
           const file = await stat(this.cacheFile(book, chapter));
           if (file.isFile() && file.size > 0 && file.size === expectedSize) return false;
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-        // 校验和修复也纳入书籍锁，避免与用户刷新当前章交错、误删刚写好的缓存。
+        // 校验和修复纳入章节锁，避免与用户刷新当前章交错，同时不阻塞其它已缓存章节的读取。
         await rm(this.cacheFile(book, chapter), { force: true });
         delete book.cacheSizes[chapter.id]; this.syncCached(book); await this.save();
       }
@@ -316,7 +325,7 @@ export class OnlineLibrary {
       this.source(book.sourceId, true);
       const content = await this.chapterData(id, index, false);
       return !content.cached;
-    });
+    }));
   }
   private cacheAllPause(task: CacheAllTask): Promise<void> {
     return new Promise(resolve => {
@@ -335,7 +344,7 @@ export class OnlineLibrary {
     finally { const remaining = (this.cacheMaintenance.get(id) ?? 1) - 1; if (remaining) this.cacheMaintenance.set(id, remaining); else this.cacheMaintenance.delete(id); }
   }
   async clearCache(id: string): Promise<OnlineBookRecord> {
-    return this.withCacheMaintenance(id, () => this.withBook(id, async () => { const book = await this.clearBookCache(id); this.cacheAllTasks.delete(id); return book; }));
+    return this.withCacheMaintenance(id, () => this.withBookExclusive(id, async () => { const book = await this.clearBookCache(id); this.cacheAllTasks.delete(id); return book; }));
   }
   private async clearBookCache(id: string): Promise<OnlineBookRecord> {
     const book = this.book(id);
@@ -346,7 +355,7 @@ export class OnlineLibrary {
     return this.publicBook(book);
   }
   async removeBook(id: string): Promise<OnlineBookRecord[]> {
-    return this.withCacheMaintenance(id, () => this.withBook(id, async () => {
+    return this.withCacheMaintenance(id, () => this.withBookExclusive(id, async () => {
       const book = this.book(id);
       const index = this.state.books.indexOf(book);
       this.state.books.splice(index, 1);
@@ -361,7 +370,14 @@ export class OnlineLibrary {
       return this.listBooks();
     }));
   }
-  flush(): Promise<void> { return Promise.all([this.sourceOperations, this.writes]).then(() => undefined); }
+  async flush(): Promise<void> {
+    // cacheWrites 会继续排队 writes；循环等待直到所有写队列稳定。
+    while (true) {
+      const pending = [this.sourceOperations, this.cacheWrites, this.writes];
+      await Promise.all(pending);
+      if (this.sourceOperations === pending[0] && this.cacheWrites === pending[1] && this.writes === pending[2]) return;
+    }
+  }
 
   private withSources<T>(operation: () => Promise<T>): Promise<T> {
     const pending = this.sourceOperations.then(operation);
@@ -413,10 +429,40 @@ export class OnlineLibrary {
       if (signal.aborted) aborted();
     });
   }
-  private withBook<T>(id: string, operation: () => Promise<T>): Promise<T> {
-    const pending = (this.bookOperations.get(id) ?? Promise.resolve()).catch(() => undefined).then(operation);
-    this.bookOperations.set(id, pending);
-    void pending.finally(() => { if (this.bookOperations.get(id) === pending) this.bookOperations.delete(id); }).catch(() => undefined);
+  private bookLock(id: string): BookLockState {
+    let lock = this.bookLocks.get(id);
+    if (!lock) { lock = { activeReaders: 0, writerActive: false, waitingReaders: [], waitingWriters: [] }; this.bookLocks.set(id, lock); }
+    return lock;
+  }
+  private drainBookLock(id: string): void {
+    const lock = this.bookLocks.get(id);
+    if (!lock || lock.writerActive) return;
+    if (lock.waitingWriters.length) {
+      if (lock.activeReaders === 0) { lock.writerActive = true; lock.waitingWriters.shift()!(); }
+      return;
+    }
+    while (lock.waitingReaders.length) { lock.activeReaders++; lock.waitingReaders.shift()!(); }
+    if (lock.activeReaders === 0 && !lock.writerActive) this.bookLocks.delete(id);
+  }
+  private async withBookShared<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const lock = this.bookLock(id);
+    if (lock.writerActive || lock.waitingWriters.length) await new Promise<void>(resolve => lock.waitingReaders.push(resolve));
+    else lock.activeReaders++;
+    try { return await operation(); }
+    finally { lock.activeReaders--; this.drainBookLock(id); }
+  }
+  private async withBookExclusive<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const lock = this.bookLock(id);
+    if (lock.writerActive || lock.activeReaders > 0) await new Promise<void>(resolve => lock.waitingWriters.push(resolve));
+    else lock.writerActive = true;
+    try { return await operation(); }
+    finally { lock.writerActive = false; this.drainBookLock(id); }
+  }
+  private withChapter<T>(id: string, chapterIndex: number, operation: () => Promise<T>): Promise<T> {
+    const key = `${id}#${chapterIndex}`;
+    const pending = (this.chapterOperations.get(key) ?? Promise.resolve()).catch(() => undefined).then(operation);
+    this.chapterOperations.set(key, pending);
+    void pending.finally(() => { if (this.chapterOperations.get(key) === pending) this.chapterOperations.delete(key); }).catch(() => undefined);
     return pending;
   }
   private parsePage(source: BookSource, response: TextResponse, operation: string) {
@@ -479,6 +525,12 @@ export class OnlineLibrary {
       book.progress = index >= 0 ? { ...book.progress, chapter: index } : undefined;
     }
     book.chapters = chapters;
+    const validIds = new Set(chapters.map(chapter => chapter.id));
+    const staleIds = Object.keys(book.cacheSizes).filter(chapterId => !validIds.has(chapterId));
+    for (const staleId of staleIds) {
+      delete book.cacheSizes[staleId];
+      await rm(path.join(this.root, 'cache', book.id, staleId + '.txt'), { force: true }).catch(() => undefined);
+    }
     if (title) book.title = title.slice(0, 300);
     if (author) book.author = author.slice(0, 300);
     this.syncCached(book);
