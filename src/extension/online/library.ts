@@ -171,14 +171,16 @@ export class OnlineLibrary {
       if (this.state.books.length >= 200) throw new Error('在线书架最多保存 200 本书');
       const book: StoredBook = { id, sourceId: source.id, title: result.title.trim(), author: typeof result.author === 'string' ? result.author.slice(0, 300) : undefined, url, addedAt: new Date().toISOString(), chapters: [], cachedChapters: [], cacheSizes: {} };
       // 先取得可用目录，再加入书架；无效规则不会留下无法阅读的空条目。
-      await this.refreshToc(book, source);
-      this.state.books.push(book);
-      try { await this.save(); }
-      catch (error) {
-        // 保存失败必须撤回内存条目，后续重试才会再次落盘，而不是命中“已存在”。
-        this.state.books = this.state.books.filter(item => item !== book);
-        throw error;
-      }
+      const fetched = await this.fetchToc(book.url, source);
+      this.applyToc(book, fetched);
+      await this.commitState(() => {
+        if (this.state.books.length >= 200) throw new Error('在线书架最多保存 200 本书');
+        const books = [...this.state.books, book];
+        return {
+          nextState: { ...this.state, books },
+          apply: () => { this.state.books = books; },
+        };
+      });
       return this.publicBook(book);
     });
   }
@@ -192,17 +194,9 @@ export class OnlineLibrary {
       if (refresh && this.cacheAllActive(id)) throw new Error('正在缓存全本，请先取消缓存后再刷新目录');
       const book = this.book(id);
       if (refresh || !book.chapters.length) {
-        const previous = {
-          chapters: book.chapters, progress: book.progress, title: book.title, author: book.author,
-          cacheSizes: { ...book.cacheSizes }, cachedChapters: [...book.cachedChapters],
-        };
-        const staleIds = await this.refreshToc(book, this.source(book.sourceId, true));
-        try { await this.save(); }
-        catch (error) {
-          // 先提交索引再删除旧正文；写盘失败时回滚内存并完整保留离线缓存。
-          Object.assign(book, previous);
-          throw error;
-        }
+        const fetched = await this.fetchToc(book.url, this.source(book.sourceId, true));
+        // 先在统一串行队列内提交索引，写盘成功后再更新内存并删除旧正文，避免并发保存捕获未提交目录。
+        const staleIds = await this.commitBookUpdate(book, draft => this.applyToc(draft, fetched));
         for (const staleId of staleIds) {
           await rm(path.join(this.root, 'cache', book.id, staleId + '.txt'), { force: true }).catch(() => undefined);
         }
@@ -234,7 +228,9 @@ export class OnlineLibrary {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'ENOENT' && code !== 'VSREAD_EMPTY_CACHE') throw error;
         if (code === 'VSREAD_EMPTY_CACHE') await rm(this.cacheFile(book, chapter), { force: true });
-        if (book.cacheSizes[chapter.id] !== undefined) { delete book.cacheSizes[chapter.id]; this.syncCached(book); await this.save(); }
+        if (book.cacheSizes[chapter.id] !== undefined) {
+          await this.commitBookUpdate(book, draft => { delete draft.cacheSizes[chapter.id]; this.syncCached(draft); });
+        }
       }
     }
     const active = this.activeChapters.get(key);
@@ -246,8 +242,11 @@ export class OnlineLibrary {
   async saveProgress(id: string, chapter: number, scroll: number): Promise<void> {
     const book = this.book(id);
     if (!Number.isSafeInteger(chapter) || !book.chapters[chapter] || typeof scroll !== 'number' || !Number.isFinite(scroll)) throw new Error('在线阅读位置无效');
-    book.progress = { chapter, scroll: boundedNumber(scroll, 0, 1, 0), updatedAt: new Date().toISOString() };
-    await this.save();
+    const clampedScroll = boundedNumber(scroll, 0, 1, 0);
+    await this.commitBookUpdate(book, draft => {
+      if (!draft.chapters[chapter]) throw new Error('在线阅读位置无效');
+      draft.progress = { chapter, scroll: clampedScroll, updatedAt: new Date().toISOString() };
+    });
   }
   async cacheChapters(id: string, from: number, count: number): Promise<{ cached: number; failed: number }> {
     const book = this.book(id);
@@ -334,7 +333,7 @@ export class OnlineLibrary {
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         // 校验和修复纳入章节锁，避免与用户刷新当前章交错，同时不阻塞其它已缓存章节的读取。
         await rm(this.cacheFile(book, chapter), { force: true });
-        delete book.cacheSizes[chapter.id]; this.syncCached(book); await this.save();
+        await this.commitBookUpdate(book, draft => { delete draft.cacheSizes[chapter.id]; this.syncCached(draft); });
       }
       if (task.cancelRequested) return false;
       this.source(book.sourceId, true);
@@ -365,21 +364,19 @@ export class OnlineLibrary {
     const book = this.book(id);
     // 缓存路径仅由已验证哈希构成，源配置不能指定本地文件名。
     await rm(path.join(this.root, 'cache', book.id), { recursive: true, force: true });
-    book.cacheSizes = {}; this.syncCached(book);
-    await this.save();
+    await this.commitBookUpdate(book, draft => { draft.cacheSizes = {}; this.syncCached(draft); });
     return this.publicBook(book);
   }
   async removeBook(id: string): Promise<OnlineBookRecord[]> {
     return this.withCacheMaintenance(id, () => this.withBookExclusive(id, async () => {
       const book = this.book(id);
-      const index = this.state.books.indexOf(book);
-      this.state.books.splice(index, 1);
-      try { await this.save(); }
-      catch (error) {
-        // 先提交索引，再删除缓存；写盘失败时书籍及离线正文仍完整保留。
-        this.state.books.splice(Math.min(index, this.state.books.length), 0, book);
-        throw error;
-      }
+      await this.commitState(() => {
+        const books = this.state.books.filter(item => item !== book);
+        return {
+          nextState: { ...this.state, books },
+          apply: () => { this.state.books = books; },
+        };
+      });
       await rm(path.join(this.root, 'cache', book.id), { recursive: true, force: true });
       this.cacheAllTasks.delete(id);
       return this.listBooks();
@@ -401,14 +398,10 @@ export class OnlineLibrary {
   }
   private async commitSources(next: BookSource[]): Promise<void> {
     if (next.length > 200) throw new Error('最多保存 200 个书源，请先移除不需要的书源');
-    const previous = this.state.sources;
-    this.state.sources = next;
-    try { await this.save(); }
-    catch (error) {
-      // 书源变更串行提交；失败恢复原数组，不会覆盖随后排队的导入、启停或移除。
-      this.state.sources = previous;
-      throw error;
-    }
+    await this.commitState(() => ({
+      nextState: { ...this.state, sources: next },
+      apply: () => { this.state.sources = next; },
+    }));
   }
 
   private request(url: string, maxBytes?: number, context: { operation: string; source: string } = { operation: 'request', source: '在线书源' }, signal?: AbortSignal) {
@@ -505,8 +498,8 @@ export class OnlineLibrary {
   }
   private cacheFile(book: StoredBook, chapter: OnlineChapter): string { return path.join(this.root, 'cache', book.id, chapter.id + '.txt'); }
   private syncCached(book: StoredBook): void { book.cachedChapters = book.chapters.flatMap((chapter, index) => book.cacheSizes[chapter.id] === undefined ? [] : [index]); }
-  private async refreshToc(book: StoredBook, source: BookSource): Promise<string[]> {
-    const response = await this.request(resolveSourceUrl(source, book.url), undefined, { operation: 'book-info', source: source.name });
+  private async fetchToc(bookUrl: string, source: BookSource): Promise<{ chapters: OnlineChapter[]; title?: string; author?: string }> {
+    const response = await this.request(resolveSourceUrl(source, bookUrl), undefined, { operation: 'book-info', source: source.name });
     let document = this.parsePage(source, response, 'book-info');
     const info = document.scope(source.bookInfo?.init);
     const title = info.read(source.bookInfo?.name);
@@ -534,17 +527,20 @@ export class OnlineLibrary {
       this.log?.('warn', 'online.empty_toc', { source: source.name, operation: 'toc', url: diagnosticUrl(base) });
       throw new Error(`「${source.name}」没有解析到章节，请检查目录规则或站点是否需要登录/脚本`);
     }
+    return { chapters, title: title || undefined, author: author || undefined };
+  }
+  private applyToc(book: StoredBook, fetched: { chapters: OnlineChapter[]; title?: string; author?: string }): string[] {
     const oldChapter = book.progress && book.chapters[book.progress.chapter]?.id;
     if (oldChapter && book.progress) {
-      const index = chapters.findIndex(chapter => chapter.id === oldChapter);
+      const index = fetched.chapters.findIndex(chapter => chapter.id === oldChapter);
       book.progress = index >= 0 ? { ...book.progress, chapter: index } : undefined;
     }
-    book.chapters = chapters;
-    const validIds = new Set(chapters.map(chapter => chapter.id));
+    book.chapters = fetched.chapters;
+    const validIds = new Set(fetched.chapters.map(chapter => chapter.id));
     const staleIds = Object.keys(book.cacheSizes).filter(chapterId => !validIds.has(chapterId));
     for (const staleId of staleIds) delete book.cacheSizes[staleId];
-    if (title) book.title = title.slice(0, 300);
-    if (author) book.author = author.slice(0, 300);
+    if (fetched.title) book.title = fetched.title.slice(0, 300);
+    if (fetched.author) book.author = fetched.author.slice(0, 300);
     this.syncCached(book);
     return staleIds;
   }
@@ -573,15 +569,11 @@ export class OnlineLibrary {
     await operation;
     return { chapter: clone(chapter), text, cached: false };
   }
-  private async persistCacheSize(book: StoredBook, chapterId: string, bytes: number): Promise<void> {
-    const previous = book.cacheSizes[chapterId];
-    book.cacheSizes[chapterId] = bytes; this.syncCached(book);
-    try { await this.save(); }
-    catch (error) {
-      // 正文文件保留供重试，失败索引不能被误判为已经持久化的成功缓存。
-      if (previous === undefined) delete book.cacheSizes[chapterId]; else book.cacheSizes[chapterId] = previous;
-      this.syncCached(book); throw error;
-    }
+  private persistCacheSize(book: StoredBook, chapterId: string, bytes: number): Promise<void> {
+    return this.commitBookUpdate(book, draft => {
+      draft.cacheSizes[chapterId] = bytes;
+      this.syncCached(draft);
+    });
   }
   private validateBook(value: unknown): StoredBook {
     if (!isRecord(value) || typeof value.id !== 'string' || !/^[a-f0-9]{64}$/.test(value.id) || typeof value.sourceId !== 'string' || typeof value.title !== 'string' || typeof value.url !== 'string' || !Array.isArray(value.chapters) || value.chapters.length > 20_000) throw new Error('在线书籍记录无效');
@@ -596,17 +588,46 @@ export class OnlineLibrary {
     this.syncCached(book);
     return book;
   }
-  private save(): Promise<void> {
-    const snapshot = JSON.stringify(this.state);
-    if (Buffer.byteLength(snapshot, 'utf8') > 20 * 1024 * 1024) throw new Error('在线书库索引过大，请移除不需要的书籍');
-    const operation = this.writes.then(async () => {
-      const filename = path.join(this.root, 'online.json');
-      await writeFile(filename + '.tmp', snapshot, 'utf8');
-      try { await copyFile(filename, path.join(this.root, 'online.backup.json')); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      await rename(filename + '.tmp', filename);
+  private cloneBookDraft(book: StoredBook): StoredBook {
+    return {
+      ...book,
+      progress: book.progress ? { ...book.progress } : undefined,
+      cachedChapters: [...book.cachedChapters],
+      cacheSizes: { ...book.cacheSizes },
+    };
+  }
+  private commitBookUpdate<T = void>(book: StoredBook, update: (draft: StoredBook) => T): Promise<T> {
+    return this.commitState(() => {
+      const index = this.state.books.indexOf(book);
+      if (index < 0) throw new Error('在线书籍不存在');
+      const draft = this.cloneBookDraft(book);
+      const result = update(draft);
+      const books = [...this.state.books];
+      books[index] = draft;
+      return {
+        nextState: { ...this.state, books },
+        apply: () => { Object.assign(book, draft); return result; },
+      };
     });
-    this.writes = operation.catch(() => undefined);
+  }
+  private commitState<T>(prepare: () => { nextState: State; apply: () => T }): Promise<T> {
+    // 所有共享状态变更与全库落盘统一串行：先基于已提交状态构造快照并写盘，成功后再更新内存，
+    // 防止并发保存捕获其它操作未提交（或即将失败回滚）的临时状态。
+    const operation = this.writes.then(async () => {
+      const { nextState, apply } = prepare();
+      const snapshot = JSON.stringify(nextState);
+      if (Buffer.byteLength(snapshot, 'utf8') > 20 * 1024 * 1024) throw new Error('在线书库索引过大，请移除不需要的书籍');
+      await this.writeSnapshot(snapshot);
+      return apply();
+    });
+    this.writes = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+  private async writeSnapshot(snapshot: string): Promise<void> {
+    const filename = path.join(this.root, 'online.json');
+    await writeFile(filename + '.tmp', snapshot, 'utf8');
+    try { await copyFile(filename, path.join(this.root, 'online.backup.json')); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    await rename(filename + '.tmp', filename);
   }
 }

@@ -194,3 +194,68 @@ test('加入和移除在线书籍写盘失败时，内存与缓存不会产生�
     await assert.rejects(readFile(path.join(root, 'cache', book.id, book.chapters[0].id + '.txt')), { code: 'ENOENT' });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('目录刷新写盘失败期间的并发进度保存，不会把未提交的临时目录写入磁盘', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vsread-online-concurrent-commit-'));
+  let shrunk = false;
+  const fetchText: TextFetcher = async url => {
+    if (url.endsWith('/book/a')) {
+      return {
+        url,
+        text: shrunk
+          ? '<a class="chapter" href="/a/2">第二章</a>'
+          : '<a class="chapter" href="/a/1">第一章</a><a class="chapter" href="/a/2">第二章</a>',
+      };
+    }
+    if (url.endsWith('/book/b')) return { url, text: '<a class="chapter" href="/b/1">B 第一章</a>' };
+    return { url, text: `<article id="content">正文 ${url}</article>` };
+  };
+  try {
+    const library = new OnlineLibrary(root, { fetchText }); await library.load();
+    const imported = await library.importSources({ json: JSON.stringify({ ...source, ruleBookInfo: {}, ruleToc: { chapterList: 'a.chapter', chapterName: '@text', chapterUrl: '@href' } }) });
+    const bookA = await library.add({ sourceId: imported.sources[0].id, title: '书 A', url: 'https://books.example.test/book/a' });
+    const bookB = await library.add({ sourceId: imported.sources[0].id, title: '书 B', url: 'https://books.example.test/book/b' });
+    await library.chapter(bookA.id, 0);
+    await library.chapter(bookA.id, 1);
+
+    // 拦截下一次写盘，使其在 A 书目录刷新写盘阶段挂起并最终失败，随后放行 B 书进度写盘。
+    const internal = library as unknown as { writeSnapshot(snapshot: string): Promise<void> };
+    const originalWrite = internal.writeSnapshot.bind(library);
+    let enteredWrite!: () => void;
+    let rejectFirstWrite!: (error: Error) => void;
+    const firstWriteStarted = new Promise<void>(resolve => { enteredWrite = resolve; });
+    let failFirst = true;
+    internal.writeSnapshot = async (snapshot: string) => {
+      if (failFirst) {
+        failFirst = false;
+        enteredWrite();
+        await new Promise<void>((_resolve, reject) => { rejectFirstWrite = reject; });
+      }
+      return originalWrite(snapshot);
+    };
+
+    shrunk = true;
+    const refreshingA = library.open(bookA.id, true);
+    await firstWriteStarted;
+
+    // A 书正在写盘期间：内存不应暴露未提交的 1 章目录，且 B 书并发保存进度排队等待 A 事务结束。
+    assert.equal(library.listBooks().find(book => book.id === bookA.id)?.chapters.length, 2);
+    const savingB = library.saveProgress(bookB.id, 0, 0.75);
+    rejectFirstWrite(new Error('模拟磁盘写入失败'));
+
+    await assert.rejects(refreshingA, /模拟磁盘写入失败/);
+    await savingB;
+    await library.flush();
+
+    // 内存与磁盘都必须保留 A 书原来的 2 章及离线正文，同时保存 B 书的新进度。
+    assert.equal(library.listBooks().find(book => book.id === bookA.id)?.chapters.length, 2);
+    assert.equal((await library.chapter(bookA.id, 0)).cached, true);
+    const restored = new OnlineLibrary(root, { fetchText }); await restored.load();
+    const restoredA = await restored.open(bookA.id);
+    const restoredB = await restored.open(bookB.id);
+    assert.equal(restoredA.chapters.length, 2);
+    assert.deepEqual(restoredA.cachedChapters, [0, 1]);
+    assert.equal((await restored.chapter(bookA.id, 0)).cached, true);
+    assert.equal(restoredB.progress?.scroll, 0.75);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
