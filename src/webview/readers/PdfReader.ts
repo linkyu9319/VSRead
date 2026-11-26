@@ -34,6 +34,7 @@ export class PdfReader implements ReaderAdapter {
 
   constructor(private container: HTMLElement, private settings: ReaderSettings, private events: ReaderEvents) {
     container.className = 'engine-surface pdf-surface';
+    container.dataset.pdfFilter = settings.pdfFilter ?? 'none';
     this.width = container.clientWidth;
     container.addEventListener('scroll', this.onScroll, { passive: true });
     this.resize = new ResizeObserver(() => {
@@ -229,6 +230,7 @@ export class PdfReader implements ReaderAdapter {
   update(settings: ReaderSettings): void {
     const zoomChanged = this.settings.zoom !== settings.zoom;
     this.settings = settings;
+    this.container.dataset.pdfFilter = settings.pdfFilter ?? 'none';
     if (zoomChanged && this.document) void this.show(this.pageNumber, this.scrollRatio()).catch(this.events.error);
   }
   destroy(): void {

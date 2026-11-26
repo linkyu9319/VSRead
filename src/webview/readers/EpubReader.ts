@@ -4,9 +4,17 @@ import type { OpenBook, ReaderSettings, ReadingPosition, TocItem } from '../../s
 import { sanitizeEpubDocument } from './epubSecurity';
 import { readBookBytes } from './bookBytes';
 import { estimateEpubProgress, type EpubLocation } from './epubProgress';
-import { progress, readingColors, type ReaderAdapter, type ReaderEvents } from './types';
+import { progress, readingColors, type ReaderAdapter, type ReaderEvents, type SearchHit } from './types';
 import { resetReadingScroll, scrollReadingSurface, stopReadingScroll } from './readerScroll';
 import { focusReadingSurface } from './readerFocus';
+
+interface SpineSearchSection {
+  href: string;
+  document?: Document;
+  load(request: Book['load']): Promise<Document>;
+  unload(): void;
+  find(query: string): { cfi: string; excerpt: string }[];
+}
 
 export class EpubReader implements ReaderAdapter {
   private book?: Book;
@@ -14,6 +22,8 @@ export class EpubReader implements ReaderAdapter {
   private destroyed = false;
   private ready = false;
   private moving = false;
+  private searchGeneration = 0;
+  private tocLabels = new Map<string, string>();
   private watchedViewport?: HTMLElement;
   private scrollTimer?: ReturnType<typeof setTimeout>;
   private abort = new AbortController();
@@ -31,7 +41,12 @@ export class EpubReader implements ReaderAdapter {
     this.events.metadata({ title: metadata.title, author: metadata.creator });
     const navigation = await book.loaded.navigation;
     if (this.destroyed) return;
-    const convert = (items: NavItem[]): TocItem[] => items.map(item => ({ id: item.href, label: item.label.trim(), children: item.subitems?.length ? convert(item.subitems) : undefined }));
+    const convert = (items: NavItem[]): TocItem[] => items.map(item => {
+      const label = item.label.trim();
+      const baseHref = item.href.split('#')[0];
+      if (label && !this.tocLabels.has(baseHref)) this.tocLabels.set(baseHref, label);
+      return { id: item.href, label, children: item.subitems?.length ? convert(item.subitems) : undefined };
+    });
     this.events.toc(convert(navigation.toc));
     const rendition = this.rendition = book.renderTo(this.container, {
       width: '100%', height: '100%', spread: 'none',
@@ -155,6 +170,36 @@ export class EpubReader implements ReaderAdapter {
       if (!this.destroyed) this.watchViewport();
     }
   }
+  async search(query: string): Promise<SearchHit[]> {
+    const trimmed = query.trim();
+    const book = this.book;
+    if (!trimmed || !book || this.destroyed) return [];
+    const token = ++this.searchGeneration;
+    const items = (book.spine as unknown as { spineItems?: SpineSearchSection[] }).spineItems ?? [];
+    const displayedIndices = new Set(((this.rendition?.getContents() as unknown as Contents[]) ?? []).map(content => content.sectionIndex));
+    const hits: SearchHit[] = [];
+    for (let i = 0; i < items.length && hits.length < 100 && !this.destroyed && token === this.searchGeneration; i++) {
+      const section = items[i];
+      const alreadyLoaded = !!section.document;
+      try {
+        if (!alreadyLoaded) await section.load(book.load.bind(book));
+        if (this.destroyed || token !== this.searchGeneration) break;
+        const found = section.find(trimmed) ?? [];
+        const chapterLabel = this.tocLabels.get(section.href) ?? `第 ${i + 1} 节`;
+        for (const hit of found) {
+          if (hits.length >= 100) break;
+          const excerpt = hit.excerpt.replace(/\s+/g, ' ').trim();
+          hits.push({ id: hit.cfi, label: `${chapterLabel} · ${excerpt}` });
+        }
+      } catch { /* 跳过无法加载的特殊章节项，继续搜索其余章节。 */ }
+      finally {
+        if (!alreadyLoaded && !displayedIndices.has(i)) {
+          try { section.unload(); } catch { /* ignore */ }
+        }
+      }
+    }
+    return hits;
+  }
   update(settings: ReaderSettings): void {
     const oldFlow = this.settings.flow;
     this.settings = settings;
@@ -174,6 +219,9 @@ export class EpubReader implements ReaderAdapter {
       style.id = 'vsread-reader-style';
       (document.head ?? document.documentElement).append(style);
     }
+    const maxWidth = settings.maxWidth ?? 830;
+    const paragraphSpacing = settings.paragraphSpacing ?? 0.8;
+    const widthRule = settings.flow === 'scrolled' ? `max-width: ${maxWidth}px !important; margin-left: auto !important; margin-right: auto !important;` : '';
     // 独立替换样式节点，避免 epub.js registerRules 在每次拖动字号时累积 CSS 规则。
     // 正文段落和 span 采用用户偏好，标题仍保留书籍自身的颜色与字号层次。
     style.textContent = `
@@ -184,7 +232,7 @@ export class EpubReader implements ReaderAdapter {
         line-height: ${settings.lineHeight} !important;
         font-family: ${settings.fontFamily === 'serif' ? 'SimSun, serif' : 'system-ui, sans-serif'} !important;
       }
-      body { padding: 20px 28px !important; }
+      body { padding: 20px 28px !important; ${widthRule} }
       html body :is(p, div, section, article, main, li, blockquote, span, font, td, dd, dt):not(h1 *, h2 *, h3 *, h4 *, h5 *, h6 *) {
         color: ${colors.foreground} !important;
         background-color: transparent !important;
@@ -192,6 +240,7 @@ export class EpubReader implements ReaderAdapter {
         line-height: ${settings.lineHeight} !important;
         font-family: ${settings.fontFamily === 'serif' ? 'SimSun, serif' : 'system-ui, sans-serif'} !important;
       }
+      p { margin-bottom: ${paragraphSpacing}em !important; }
       img { max-width: 100% !important; height: auto !important; }
       a { color: inherit !important; }
     `;
@@ -200,6 +249,7 @@ export class EpubReader implements ReaderAdapter {
     this.abort.abort();
     this.destroyed = true;
     this.ready = false;
+    this.searchGeneration++;
     clearTimeout(this.scrollTimer);
     this.watchedViewport?.removeEventListener('scroll', this.onViewportScroll);
     this.book?.destroy();

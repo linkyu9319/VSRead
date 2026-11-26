@@ -74,12 +74,12 @@ export function ReaderView(props: Props) {
       <button className={`text-button ${tocVisible ? 'active' : ''}`} onClick={() => setTocVisible(!tocVisible)} aria-label="切换目录" aria-expanded={tocVisible}><Icon name="menu" size={16} /><span>目录</span></button>
       <span className="toolbar-divider" />
       {source.book.format === 'txt' && <label className="encoding-label">编码<select aria-label="文字编码" value={source.book.encoding ?? 'auto'} onChange={event => props.onEncoding(event.target.value as TextEncoding)}><option value="auto">自动识别</option><option value="utf-8">UTF-8</option><option value="gb18030">GBK / GB18030</option><option value="utf-16le">UTF-16 LE</option><option value="utf-16be">UTF-16 BE</option></select></label>}
-      {source.book.format === 'pdf' && <form className="pdf-search" onSubmit={event => {
+      <form className="pdf-search" onSubmit={event => {
         event.preventDefault();
         if (!engine.current?.search || searching || !search.trim()) return;
         setSearching(true);
         void engine.current.search(search.trim()).then(setHits).catch(props.onError).finally(() => setSearching(false));
-      }}><Icon name="search" size={15} /><input aria-label="搜索 PDF 文字" placeholder="搜索 PDF 文字…" value={search} onChange={event => setSearch(event.target.value)} /><button className="text-button" disabled={searching || loading}>{searching ? '搜索中…' : '查找'}</button></form>}
+      }}><Icon name="search" size={15} /><input aria-label={source.book.format === 'pdf' ? '搜索 PDF 文字' : `搜索 ${source.book.format.toUpperCase()} 文字`} placeholder="搜索书内文字…" value={search} onChange={event => setSearch(event.target.value)} /><button className="text-button" disabled={searching || loading}>{searching ? '搜索中…' : '查找'}</button></form>
       <span className="toolbar-hint">↑ ↓ 滚动 · ← → / PageUp / PageDown 翻页</span>
     </div>
     <div className="reader-body">
@@ -89,7 +89,7 @@ export function ReaderView(props: Props) {
         {loading && <div className="reader-overlay"><span className="spinner" /><p>正在翻开这本书…</p></div>}
         {failed && <div className="reader-overlay"><Icon name="book" size={32} /><p>这本书暂时无法打开</p><small>请检查文件是否完整、是否受 DRM 或密码保护。</small></div>}
       </div>
-      {hits && <aside className="search-results"><div className="panel-heading">搜索结果 <button className="icon-button" onClick={() => setHits(undefined)} aria-label="关闭搜索结果"><Icon name="close" size={15} /></button></div><p className="muted">{hits.length ? `找到 ${hits.length} 个页面${hits.length === 100 ? '（最多显示 100 个）' : ''}` : '没有找到文字；扫描件暂不支持 OCR。'}</p>{hits.map(hit => <button key={hit.id} onClick={() => goTo(hit.id)}>{hit.label}</button>)}</aside>}
+      {hits && <aside className="search-results"><div className="panel-heading">搜索结果 <button className="icon-button" onClick={() => setHits(undefined)} aria-label="关闭搜索结果"><Icon name="close" size={15} /></button></div><p className="muted">{hits.length ? `找到 ${hits.length} 处匹配${hits.length === 100 ? '（最多显示 100 条）' : ''}` : source.book.format === 'pdf' ? '没有找到文字；扫描件暂不支持 OCR。' : '没有找到匹配的文字。'}</p>{hits.map((hit, index) => <button key={`${hit.id}:${index}`} onClick={() => goTo(hit.id)}>{hit.label}</button>)}</aside>}
     </div>
     <div className="page-controls"><button className="text-button" disabled={loading || failed} onClick={() => navigate('previous')}><Icon name="left" size={16} />上一页</button><span>把这一页，留给自己。</span><button className="text-button" disabled={loading || failed} onClick={() => navigate('next')}>下一页<Icon name="right" size={16} /></button></div>
   </div>;

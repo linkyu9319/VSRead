@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import path from 'node:path';
-import { rm } from 'node:fs/promises';
+import { rename, rm, writeFile } from 'node:fs/promises';
 import { LibraryStore } from './store';
 import { BookLibrary } from './library';
 import { renderWebview } from './webview';
@@ -37,7 +37,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   try { await libraryStore.load(); store = libraryStore; }
   catch (error) { libraryError = `本地书库暂不可用：${errorMessage(error)}`; log.write('error', 'library.load_failed', diagnosticError(error)); }
   const requireLibrary = () => { if (libraryError) throw new Error(libraryError); };
-  const localMethods = new Set(['init', 'import', 'open', 'text', 'binary', 'progress', 'settings', 'metadata', 'encoding', 'remove']);
+  const localMethods = new Set(['init', 'import', 'open', 'text', 'text.search', 'binary', 'progress', 'settings', 'metadata', 'encoding', 'pin', 'remove']);
   const library = new BookLibrary(libraryStore, path.join(context.extensionPath, 'dist', 'txtWorker.cjs'));
   const online = new OnlineLibrary(path.join(context.globalStorageUri.fsPath, 'online'), { log: log.write });
   let onlineError: string | undefined;
@@ -134,7 +134,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         // 加载失败时禁止用默认空书库覆盖原始文件。
         if (localMethods.has(request.method)) requireLibrary();
         // 在线数据损坏只影响在线功能，本地文件阅读仍可正常使用。
-        if (onlineError && (request.method.startsWith('sources.') || request.method.startsWith('online.'))) throw new Error(onlineError);
+        if (onlineError && (request.method.startsWith('sources.') || request.method.startsWith('online.') || request.method.startsWith('replaceRules.'))) throw new Error(onlineError);
         let result: unknown;
         switch (request.method) {
           case 'init': result = { ...libraryStore.data, initialView: requestedView, initialFocus: requestedFocus }; requestedView = undefined; requestedFocus = undefined; break;
@@ -147,6 +147,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           case 'import': { const importedBookId = await importBooks(); result = { ...libraryStore.data, ...(importedBookId ? { importedBookId } : {}) }; break; }
           case 'open': result = await openBook(args.id); break;
           case 'text': result = await library.text(library.book(args.id), args.part); break;
+          case 'text.search': result = await library.searchText(library.book(args.id), args.query); break;
           case 'binary': result = await library.binary(library.book(args.id), args.offset); break;
           case 'progress': {
             const book = library.book(args.id);
@@ -170,6 +171,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             book.progress = undefined;
             await libraryStore.save();
             result = await openBook(book.id);
+            break;
+          }
+          case 'pin': {
+            const book = library.book(args.id);
+            if (typeof args.pinned !== 'boolean') throw new Error('置顶状态无效');
+            book.pinned = args.pinned || undefined;
+            await libraryStore.save();
+            result = libraryStore.data;
             break;
           }
           case 'remove': {
@@ -216,12 +225,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           case 'online.open': result = await online.open(requiredString(args.id), args.refresh === true); break;
           case 'online.chapter': result = await online.chapter(requiredString(args.id), args.chapter as number, args.refresh === true); break;
           case 'online.progress': await online.saveProgress(requiredString(args.id), args.chapter as number, args.scroll as number); break;
+          case 'online.pin': result = await online.pinBook(requiredString(args.id), args.pinned === true); break;
+          case 'online.switchSource': {
+            if (!isRecord(args.result)) throw new Error('目标书源信息无效');
+            result = await online.switchSource(requiredString(args.id), args.result as unknown as OnlineSearchResult);
+            break;
+          }
+          case 'online.checkUpdates': {
+            const ids = Array.isArray(args.ids) && args.ids.every(item => typeof item === 'string') ? args.ids as string[] : undefined;
+            result = await online.checkAllUpdates(ids);
+            break;
+          }
+          case 'online.exportTxt': {
+            const built = await online.buildCachedTxt(requiredString(args.id));
+            const safeName = built.title.replace(/[\\/:*?"<>|\r\n]+/g, '_').trim().slice(0, 100) || 'vsread-book';
+            const destination = await vscode.window.showSaveDialog({
+              saveLabel: '导出为 TXT',
+              defaultUri: vscode.Uri.file(`${safeName}.txt`),
+              filters: { 'TXT 电子书': ['txt'] },
+            });
+            if (!destination) {
+              result = { exported: false, exportedChapters: 0, totalChapters: built.totalChapters };
+              break;
+            }
+            if (destination.scheme !== 'file') throw new Error('目前仅支持导出到本地文件');
+            const tempPath = `${destination.fsPath}.vsread-tmp`;
+            await writeFile(tempPath, built.content, 'utf8');
+            await rename(tempPath, destination.fsPath);
+            result = { exported: true, filePath: destination.fsPath, exportedChapters: built.exportedChapters, totalChapters: built.totalChapters };
+            break;
+          }
           case 'online.cache': result = await online.cacheChapters(requiredString(args.id), args.from as number, args.count as number); break;
           case 'online.cacheAll.start': result = await online.startCacheAll(requiredString(args.id)); break;
           case 'online.cacheAll.status': result = online.cacheAllStatus(requiredString(args.id)); break;
           case 'online.cacheAll.cancel': result = online.cancelCacheAll(requiredString(args.id)); break;
           case 'online.clearCache': result = await online.clearCache(requiredString(args.id)); break;
           case 'online.remove': result = await online.removeBook(requiredString(args.id)); break;
+          case 'replaceRules.list': result = online.listReplaceRules(); break;
+          case 'replaceRules.save': result = await online.saveReplaceRule(args.rule); break;
+          case 'replaceRules.toggle': result = await online.toggleReplaceRule(requiredString(args.id), args.enabled === true); break;
+          case 'replaceRules.remove': result = await online.removeReplaceRule(requiredString(args.id)); break;
           case 'updates.check': result = await updates.check(); break;
           case 'updates.install': result = await updates.install(); break;
           case 'updates.reload': await Promise.all([store?.flush(), onlineStore?.flush(), log.flush()]); await updates.reload(); break;

@@ -15,9 +15,13 @@ export function normalizeSettings(value: unknown): ReaderSettings {
     textColor: typeof input.textColor === 'string' && /^#[0-9a-f]{6}$/i.test(input.textColor) ? input.textColor.toLowerCase() : DEFAULT_SETTINGS.textColor,
     fontSize: boundedNumber(input.fontSize, 12, 40, DEFAULT_SETTINGS.fontSize),
     lineHeight: boundedNumber(input.lineHeight, 1.2, 3, DEFAULT_SETTINGS.lineHeight),
+    maxWidth: Math.round(boundedNumber(input.maxWidth, 480, 1400, DEFAULT_SETTINGS.maxWidth)),
+    paragraphSpacing: Number(boundedNumber(input.paragraphSpacing, 0, 2.4, DEFAULT_SETTINGS.paragraphSpacing).toFixed(2)),
     fontFamily: input.fontFamily === 'sans-serif' ? 'sans-serif' : 'serif',
     flow: input.flow === 'paginated' ? 'paginated' : 'scrolled',
     zoom: boundedNumber(input.zoom, 0.5, 3, 1),
+    pdfFilter: input.pdfFilter === 'dark' || input.pdfFilter === 'sepia' ? input.pdfFilter : 'none',
+    preloadNextChapter: typeof input.preloadNextChapter === 'boolean' ? input.preloadNextChapter : DEFAULT_SETTINGS.preloadNextChapter,
   };
 }
 export function validateProgress(value: unknown, format: BookFormat): Progress {

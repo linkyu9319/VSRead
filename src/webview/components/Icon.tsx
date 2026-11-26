@@ -12,6 +12,10 @@ const paths = {
   globe: 'M21 12A9 9 0 1 1 3 12a9 9 0 0 1 18 0ZM3 12h18M12 3a18 18 0 0 1 0 18 18 18 0 0 1 0-18Z',
   update: 'M20 7v5h-5M4 17v-5h5M5 8a7.5 7.5 0 0 1 12-3l3 7M4 12l3 7a7.5 7.5 0 0 0 12-3',
   focus: 'M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5',
+  pin: 'M12 17v5M8 4h8l-1.5 5 2.5 3v2H7v-2l2.5-3L8 4Z',
+  swap: 'M7 7h11m0 0-3-3m3 3-3 3M17 17H6m0 0 3 3m-3-3 3-3',
+  download: 'M12 4v12m0 0-4-4m4 4 4-4M4 19h16',
+  filter: 'M4 6h16M7 12h10M10 18h4',
 };
 export function Icon({ name, size = 18 }: { name: keyof typeof paths; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>;

@@ -30,6 +30,22 @@ export interface OnlineBookRecord {
   addedAt: string; chapters: OnlineChapter[];
   progress?: { chapter: number; scroll: number; updatedAt: string };
   cachedChapters: number[];
+  pinned?: boolean;
+  newChapters?: number;
+  lastCheckedAt?: string;
+}
+export interface ReplaceRule {
+  id: string; name: string; pattern: string; replacement: string;
+  isRegex: boolean; enabled: boolean; scope?: string;
+}
+export interface BatchUpdateSummary {
+  checked: number; skipped: number;
+  updated: { bookId: string; title: string; added: number }[];
+  failed: { bookId: string; title: string; error: string }[];
+  books: OnlineBookRecord[];
+}
+export interface ExportTxtResult {
+  exported: boolean; filePath?: string; exportedChapters: number; totalChapters: number;
 }
 export interface OnlineChapterContent { chapter: OnlineChapter; text: string; cached: boolean }
 export interface CacheAllJob {
@@ -39,7 +55,7 @@ export interface CacheAllJob {
   currentChapter?: number; error?: string;
   cachedChapters: number[];
 }
-export interface OnlineState { sources: BookSource[]; books: OnlineBookRecord[] }
+export interface OnlineState { sources: BookSource[]; books: OnlineBookRecord[]; replaceRules?: ReplaceRule[] }
 
 export interface UpdateStatus {
   state: 'available' | 'current' | 'unavailable'; currentVersion: string;
@@ -66,12 +82,20 @@ export interface OnlineRequests {
   'online.open': { args: { id: string; refresh?: boolean }; result: OnlineBookRecord };
   'online.chapter': { args: { id: string; chapter: number; refresh?: boolean }; result: OnlineChapterContent };
   'online.progress': { args: { id: string; chapter: number; scroll: number }; result: void };
+  'online.pin': { args: { id: string; pinned: boolean }; result: OnlineBookRecord };
+  'online.switchSource': { args: { id: string; result: OnlineSearchResult }; result: OnlineBookRecord };
+  'online.checkUpdates': { args: { ids?: string[] } | undefined; result: BatchUpdateSummary };
+  'online.exportTxt': { args: { id: string }; result: ExportTxtResult };
   'online.cache': { args: { id: string; from: number; count: number }; result: { cached: number; failed: number } };
   'online.cacheAll.start': { args: { id: string }; result: CacheAllJob };
   'online.cacheAll.status': { args: { id: string }; result: CacheAllJob };
   'online.cacheAll.cancel': { args: { id: string }; result: CacheAllJob };
   'online.clearCache': { args: { id: string }; result: OnlineBookRecord };
   'online.remove': { args: { id: string }; result: OnlineBookRecord[] };
+  'replaceRules.list': { args: undefined; result: ReplaceRule[] };
+  'replaceRules.save': { args: { rule: Omit<ReplaceRule, 'id'> & { id?: string } }; result: ReplaceRule[] };
+  'replaceRules.toggle': { args: { id: string; enabled: boolean }; result: ReplaceRule[] };
+  'replaceRules.remove': { args: { id: string }; result: ReplaceRule[] };
   'updates.check': { args: undefined; result: UpdateStatus };
   'updates.install': { args: undefined; result: UpdateInstallResult };
   'updates.reload': { args: undefined; result: void };

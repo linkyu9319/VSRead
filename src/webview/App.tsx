@@ -31,6 +31,7 @@ export function App() {
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [page, setPage] = useState<'shelf' | 'online'>('shelf');
   const [initialOnlineBookId, setInitialOnlineBookId] = useState<string>();
+  const [onlineNavVersion, setOnlineNavVersion] = useState(0);
   const [updatesVisible, setUpdatesVisible] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>();
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -78,7 +79,7 @@ export function App() {
     if (error) reportError(error);
   });
   const showOnline = useCallback(() => {
-    opening.current++; setSource(undefined); setPage('online'); setInitialOnlineBookId(undefined); setSettingsVisible(false); setUpdatesVisible(false);
+    opening.current++; setSource(undefined); setPage('online'); setInitialOnlineBookId(undefined); setOnlineNavVersion(value => value + 1); setSettingsVisible(false); setUpdatesVisible(false);
     rememberOnline();
     void writer.current!.flush();
   }, []);
@@ -218,7 +219,7 @@ export function App() {
     </header>
     {focusMode && <button className="focus-restore icon-button" aria-label="退出专注阅读" title="恢复界面 · Esc / Ctrl+Alt+H" onClick={() => setFocusMode(false)}><Icon name="focus" size={16} /></button>}
     {error && <div className="error-banner" role="alert"><span>{error}</span><button className="text-button" onClick={() => { void request('diagnostics.open', undefined).catch(reportError); }}>查看日志</button><button className="icon-button" aria-label="关闭提示" onClick={() => setError('')}><Icon name="close" size={15} /></button></div>}
-    <main>{initializing ? <div className="initial-loading"><span className="spinner" />正在打开书架…</div> : page === 'online' ? <OnlineHub settings={library.settings} onError={reportError} initialBookId={initialOnlineBookId} onBackToShelf={showShelf} /> : source ? <ReaderView key={source.book.id + (source.book.encoding ?? '')} source={source} settings={library.settings} onProgress={onProgress} onMetadata={onMetadata} onError={reportError} onEncoding={encoding => { if (!busy) void changeEncoding(encoding); }} /> : <Bookshelf books={library.books} busy={busy} onOpen={id => void open(id)} onOpenOnline={openOnline} onShowSources={showOnline} onError={reportError} onImport={() => void importBooks()} onRemove={id => { void writer.current!.flush().then(() => request('remove', { id })).then(setLibrary).catch(reportError); }} />}</main>
+    <main>{initializing ? <div className="initial-loading"><span className="spinner" />正在打开书架…</div> : page === 'online' ? <OnlineHub settings={library.settings} onError={reportError} initialBookId={initialOnlineBookId} resetVersion={onlineNavVersion} onBackToShelf={showShelf} /> : source ? <ReaderView key={source.book.id + (source.book.encoding ?? '')} source={source} settings={library.settings} onProgress={onProgress} onMetadata={onMetadata} onError={reportError} onEncoding={encoding => { if (!busy) void changeEncoding(encoding); }} /> : <Bookshelf books={library.books} busy={busy} onOpen={id => void open(id)} onOpenOnline={openOnline} onShowSources={showOnline} onError={reportError} onImport={() => void importBooks()} onPin={(id, pinned) => { void request('pin', { id, pinned }).then(setLibrary).catch(reportError); }} onRemove={id => { void writer.current!.flush().then(() => request('remove', { id })).then(setLibrary).catch(reportError); }} />}</main>
     {(settingsVisible || updatesVisible) && <div className="settings-dismiss" aria-hidden="true" />}
     {settingsVisible && <Settings value={library.settings} format={source?.book.format} onChange={updateSettings} onClose={() => { setSettingsVisible(false); settingsToggle.current?.focus(); }} />}
     {updatesVisible && <UpdatesPanel status={updateStatus} checking={checkingUpdates} installing={installingUpdate} reloading={reloadingUpdate} installResult={updateInstallResult} error={updateError} onCheck={() => { void checkUpdates(); }} onInstall={() => { void installUpdate(); }} onReload={() => { void reloadUpdate(); }} onOpen={() => { void request('updates.open', undefined).catch(reportError); }} onAuth={action => { void updateAuth(action); }} onClose={() => setUpdatesVisible(false)} />}

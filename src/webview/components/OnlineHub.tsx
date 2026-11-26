@@ -5,9 +5,10 @@ import { rememberOnline, request } from '../bridge';
 import { OnlineSources } from './OnlineSources';
 import { OnlineSearch } from './OnlineSearch';
 import { OnlineReader } from './OnlineReader';
+import { ReplaceRules } from './ReplaceRules';
 import '../online.css';
 
-export function OnlineHub({ settings, onError, initialBookId, onBackToShelf }: { settings: ReaderSettings; onError(error: unknown): void; initialBookId?: string; onBackToShelf(): void }) {
+export function OnlineHub({ settings, onError, initialBookId, resetVersion = 0, onBackToShelf }: { settings: ReaderSettings; onError(error: unknown): void; initialBookId?: string; resetVersion?: number; onBackToShelf(): void }) {
   const [sources, setSources] = useState<BookSource[]>([]);
   const [builtins, setBuiltins] = useState<BuiltinSourceSummary[]>([]);
   const [importExpanded, setImportExpanded] = useState(false);
@@ -23,6 +24,7 @@ export function OnlineHub({ settings, onError, initialBookId, onBackToShelf }: {
   useEffect(() => {
     active.current = true;
     const token = ++opening.current;
+    if (!initialBookId) setOpened(undefined);
     setLoading(true);
     void Promise.allSettled([request('sources.list', undefined), request('online.list', undefined), request('sources.builtin.list', undefined)]).then(async ([sourceResult, bookResult, builtinResult]) => {
       if (!active.current || token !== opening.current) return;
@@ -42,7 +44,7 @@ export function OnlineHub({ settings, onError, initialBookId, onBackToShelf }: {
       setLoading(false);
     });
     return () => { active.current = false; opening.current++; };
-  }, [onError, initialBookId]);
+  }, [onError, initialBookId, resetVersion]);
   const upsertBook = (book: OnlineBookRecord) => setBooks(previous => previous.some(item => item.id === book.id) ? previous.map(item => item.id === book.id ? book : item) : [book, ...previous]);
   const perform = async <T,>(name: string, action: () => Promise<T>): Promise<T | undefined> => {
     if (pendingRef.current) return;
@@ -99,13 +101,14 @@ export function OnlineHub({ settings, onError, initialBookId, onBackToShelf }: {
       if (active.current && revision === sourceRevision.current && pendingRef.current !== 'sources') setSources(next);
     }).catch(error => { if (active.current && revision === sourceRevision.current) onError(error); });
   };
-  if (opened) return <OnlineReader key={opened.id} book={opened} settings={settings} sourceName={sources.find(source => source.id === opened.sourceId)?.name ?? builtins.find(source => source.sourceId === opened.sourceId)?.name ?? '书源已移除'} onBack={onBackToShelf} onBookChange={upsertBook} onError={onError} />;
+  if (opened) return <OnlineReader key={opened.id} book={opened} settings={settings} sources={sources} builtins={builtins} sourceName={sources.find(source => source.id === opened.sourceId)?.name ?? builtins.find(source => source.sourceId === opened.sourceId)?.name ?? '书源已移除'} onBack={onBackToShelf} onBookChange={next => { upsertBook(next); setOpened(previous => previous?.id === next.id ? next : previous); }} onSourcesRefresh={refreshSources} onError={onError} />;
   if (loading) return <div className="initial-loading"><span className="spinner" />正在打开在线书源…</div>;
   return <div className="online-hub">
     <div className="online-intro"><span className="eyebrow">ONLINE SOURCES</span><h1>在线书源</h1><p>自选书源，按章阅读；已缓存的内容可离线打开。</p></div>
     {message && <p className="online-message" role="status">{message}<button className="text-button" onClick={onBackToShelf}>查看我的书架</button></p>}
     <OnlineSearch sources={sources} builtins={builtins} books={books} pending={pending} onUseBuiltin={useBuiltin} onAggregateDone={refreshSources} onImport={() => setImportExpanded(true)} onAdd={addBook} onOpen={book => void openBook(book)} onError={onError} />
     <OnlineSources sources={sources} busy={!!pending} expanded={importExpanded} onExpandedChange={setImportExpanded} onImport={importSources} onToggle={toggleSource} onRemove={source => { void perform('sources', async () => { const next = await request('sources.remove', { id: source.id }); if (active.current) setSources(next); }); }} />
+    <ReplaceRules onError={onError} />
     <p className="online-library-note">已加入的书籍统一保存在“我的书架”，目录与进度保存在本机，正文随阅读自动缓存。<button className="text-button" onClick={onBackToShelf}>查看我的书架{books.length ? ` · ${books.length} 本在线书籍` : ''}</button></p>
   </div>;
 }

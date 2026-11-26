@@ -3,7 +3,7 @@ import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
-import type { BinaryChunk, BookFormat, BookRecord, TextEncoding, TextIndex, TextChunk } from '../shared/model';
+import type { BinaryChunk, BookFormat, BookRecord, TextEncoding, TextIndex, TextChunk, TextSearchHit } from '../shared/model';
 import { LibraryStore } from './store';
 
 const ENCODINGS = new Set(['auto', 'utf-8', 'gb18030', 'utf-16le', 'utf-16be']);
@@ -101,6 +101,29 @@ export class BookLibrary {
     const part = index.parts[partNumber];
     if (!part) throw new Error('章节不存在');
     return { part, text: await readFile(path.join(this.textDirectory(book), `${part.index}.txt`), 'utf8') };
+  }
+  async searchText(book: BookRecord, query: unknown): Promise<TextSearchHit[]> {
+    if (book.format !== 'txt') throw new Error('仅 TXT 书籍支持宿主全文搜索');
+    if (typeof query !== 'string' || !query.trim() || query.length > 200) throw new Error('搜索内容需要 1–200 个字符');
+    const trimmed = query.trim();
+    const needle = trimmed.toLocaleLowerCase();
+    const index = await this.textIndex(book);
+    const dir = this.textDirectory(book);
+    const hits: TextSearchHit[] = [];
+    for (const part of index.parts) {
+      if (hits.length >= 100) break;
+      const content = await readFile(path.join(dir, `${part.index}.txt`), 'utf8');
+      const lower = content.toLocaleLowerCase();
+      let from = 0;
+      while (hits.length < 100) {
+        const at = lower.indexOf(needle, from);
+        if (at < 0) break;
+        const snippet = content.slice(Math.max(0, at - 18), at + trimmed.length + 42).replace(/\s+/g, ' ').trim();
+        hits.push({ part: part.index, offset: part.start + at, title: part.title, snippet });
+        from = at + Math.max(1, needle.length);
+      }
+    }
+    return hits;
   }
 
   /** 只读已导入的文件副本；固定大小分块，避免大文件以一条 Webview 消息传输。 */
