@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Worker } from 'node:worker_threads';
 import type { OnlineChapter, ReplaceRule } from '../../shared/online';
 import { isRecord } from '../../shared/validation';
 
@@ -7,9 +8,103 @@ const MAX_PATTERN_LENGTH = 500;
 const MAX_REPLACEMENT_LENGTH = 1000;
 const MAX_NAME_LENGTH = 100;
 const MAX_SCOPE_LENGTH = 200;
+const DEFAULT_REGEX_TIMEOUT_MS = 200;
+const WORKER_IDLE_MS = 30_000;
 
-/** 基础静态 ReDoS 防护：拒绝明显会导致指数回溯的嵌套量词结构。 */
+/** 基础静态 ReDoS 防护：拒绝明显会导致指数回溯的嵌套量词结构；运行期再由带超时的独立 Worker 兜底。 */
 const NESTED_QUANTIFIER = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]/;
+
+const REGEX_WORKER_SCRIPT = `
+const { parentPort } = require('node:worker_threads');
+parentPort.on('message', ({ id, text, pattern, replacement }) => {
+  try {
+    const result = text.replace(new RegExp(pattern, 'gm'), replacement);
+    parentPort.postMessage({ id, ok: true, result });
+  } catch (error) {
+    parentPort.postMessage({ id, ok: false, error: error && error.message ? error.message : String(error) });
+  }
+});
+`;
+
+class RegexWorkerPool {
+  private worker?: Worker;
+  private queue = Promise.resolve();
+  private sequence = 0;
+  private idleTimer?: ReturnType<typeof setTimeout>;
+
+  run(text: string, pattern: string, replacement: string, timeoutMs: number): Promise<{ ok: true; result: string } | { ok: false; timedOut: boolean }> {
+    const task = this.queue.then(() => this.execute(text, pattern, replacement, timeoutMs));
+    this.queue = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  dispose(): void {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = undefined;
+    const current = this.worker;
+    this.worker = undefined;
+    if (current) void current.terminate();
+  }
+
+  private ensureWorker(): Worker {
+    if (!this.worker) {
+      const worker = new Worker(REGEX_WORKER_SCRIPT, { eval: true });
+      worker.unref();
+      worker.once('exit', () => { if (this.worker === worker) this.worker = undefined; });
+      this.worker = worker;
+    }
+    return this.worker;
+  }
+
+  private scheduleIdle(): void {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.dispose(), WORKER_IDLE_MS);
+    this.idleTimer.unref?.();
+  }
+
+  private execute(text: string, pattern: string, replacement: string, timeoutMs: number): Promise<{ ok: true; result: string } | { ok: false; timedOut: boolean }> {
+    clearTimeout(this.idleTimer);
+    const worker = this.ensureWorker();
+    const id = ++this.sequence;
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (outcome: { ok: true; result: string } | { ok: false; timedOut: boolean }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.off('message', onMessage);
+        worker.off('error', onError);
+        worker.off('exit', onExit);
+        if (!outcome.ok && outcome.timedOut) {
+          if (this.worker === worker) this.worker = undefined;
+          void worker.terminate();
+        } else {
+          this.scheduleIdle();
+        }
+        resolve(outcome);
+      };
+      const onMessage = (message: { id?: number; ok?: boolean; result?: string }) => {
+        if (message?.id !== id) return;
+        if (message.ok && typeof message.result === 'string') finish({ ok: true, result: message.result });
+        else finish({ ok: false, timedOut: false });
+      };
+      const onError = () => finish({ ok: false, timedOut: false });
+      const onExit = () => finish({ ok: false, timedOut: false });
+      const timer = setTimeout(() => finish({ ok: false, timedOut: true }), Math.max(20, timeoutMs));
+      timer.unref?.();
+      worker.on('message', onMessage);
+      worker.once('error', onError);
+      worker.once('exit', onExit);
+      worker.postMessage({ id, text, pattern, replacement });
+    });
+  }
+}
+
+const regexRunner = new RegexWorkerPool();
+
+export function disposeReplaceRuleWorker(): void {
+  regexRunner.dispose();
+}
 
 export function normalizeReplaceRule(value: unknown, existingId?: string): ReplaceRule {
   if (!isRecord(value)) throw new Error('净化规则格式无效');
@@ -68,21 +163,30 @@ function matchesScope(scope: string | undefined, context: { title: string; sourc
   return targets.some(token => title.includes(token) || source.includes(token));
 }
 
-export function applyReplaceRules(text: string, rules: readonly ReplaceRule[], context: { title: string; sourceName: string }): string {
+export async function applyReplaceRules(
+  text: string,
+  rules: readonly ReplaceRule[],
+  context: { title: string; sourceName: string },
+  options: { timeoutMs?: number; onTimeout?: (rule: ReplaceRule) => void } = {},
+): Promise<string> {
   if (!text || !rules.length) return text;
+  const active = rules.filter(rule => rule.enabled && matchesScope(rule.scope, context));
+  if (!active.length) return text;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REGEX_TIMEOUT_MS;
   let output = text;
   let touched = false;
-  for (const rule of rules) {
-    if (!rule.enabled || !matchesScope(rule.scope, context)) continue;
-    try {
-      if (rule.isRegex) {
-        const next = output.replace(new RegExp(rule.pattern, 'gm'), rule.replacement);
-        if (next !== output) { output = next; touched = true; }
-      } else if (output.includes(rule.pattern)) {
-        output = output.split(rule.pattern).join(rule.replacement);
-        touched = true;
+  for (const rule of active) {
+    if (rule.isRegex) {
+      const outcome = await regexRunner.run(output, rule.pattern, rule.replacement, timeoutMs);
+      if (outcome.ok) {
+        if (outcome.result !== output) { output = outcome.result; touched = true; }
+      } else if (outcome.timedOut) {
+        options.onTimeout?.(rule);
       }
-    } catch { /* 单条规则异常不影响正文显示。 */ }
+    } else if (output.includes(rule.pattern)) {
+      output = output.split(rule.pattern).join(rule.replacement);
+      touched = true;
+    }
   }
   if (!touched) return output;
   return output.replace(/\n{3,}/g, '\n\n').trim() || text;

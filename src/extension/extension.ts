@@ -6,6 +6,7 @@ import { BookLibrary } from './library';
 import { renderWebview } from './webview';
 import { registerSidebar } from './sidebar';
 import { OnlineLibrary } from './online/library';
+import { disposeReplaceRuleWorker } from './online/replaceRules';
 import { AggregateSearchManager } from './online/aggregateSearch';
 import { UpdateService } from './updates';
 import { isRecord, normalizeSettings, validateProgress } from '../shared/validation';
@@ -336,6 +337,7 @@ export async function deactivate(): Promise<void> {
   for (const stopSearches of searchSessions) stopSearches();
   searchSessions.clear();
   onlineStore?.cancelAllCacheJobs();
+  disposeReplaceRuleWorker();
   await Promise.all([store?.flush(), onlineStore?.flush()]);
   await diagnostics?.flush();
 }

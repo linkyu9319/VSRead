@@ -304,15 +304,17 @@ export class OnlineLibrary {
     const worker = async () => {
       while (queue.length) {
         const book = queue.shift()!;
-        if (this.cacheAllActive(book.id)) { skipped++; continue; }
-        const source = this.state.sources.find(item => item.id === book.sourceId);
-        if (!source?.enabled) { skipped++; continue; }
-        checked++;
+        let title = book.title;
         try {
           await this.withBookExclusive(book.id, async () => {
             const current = this.state.books.find(item => item.id === book.id);
-            if (!current || this.cacheAllActive(current.id)) return;
-            const fetched = await this.fetchToc(current.url, source);
+            if (!current || this.cacheAllActive(current.id)) { skipped++; return; }
+            title = current.title;
+            // 在排他锁内重新读取当前书源，避免与换源并发时使用旧源解析新网址。
+            const currentSource = this.state.sources.find(item => item.id === current.sourceId);
+            if (!currentSource?.enabled) { skipped++; return; }
+            checked++;
+            const fetched = await this.fetchToc(current.url, currentSource);
             const { staleIds, added } = await this.commitBookUpdate(current, draft => {
               const previousIds = new Set(draft.chapters.map(chapter => chapter.id));
               const addedCount = fetched.chapters.filter(chapter => !previousIds.has(chapter.id)).length;
@@ -327,7 +329,7 @@ export class OnlineLibrary {
             if (added > 0) updated.push({ bookId: current.id, title: current.title, added });
           });
         } catch (error) {
-          failed.push({ bookId: book.id, title: book.title, error: error instanceof Error ? error.message : String(error) });
+          failed.push({ bookId: book.id, title, error: error instanceof Error ? error.message : String(error) });
         }
       }
     };
@@ -337,8 +339,6 @@ export class OnlineLibrary {
   async buildCachedTxt(id: string): Promise<{ title: string; author?: string; exportedChapters: number; totalChapters: number; content: string }> {
     return this.withBookShared(id, async () => {
       const book = this.book(id);
-      const sourceName = this.state.sources.find(source => source.id === book.sourceId)?.name ?? '';
-      const rules = this.state.replaceRules ?? [];
       const sections: string[] = [book.title + (book.author ? `\n作者：${book.author}` : '')];
       let exportedChapters = 0;
       for (const chapter of book.chapters) {
@@ -346,7 +346,7 @@ export class OnlineLibrary {
         try {
           const raw = await readFile(this.cacheFile(book, chapter), 'utf8');
           if (!raw.trim()) continue;
-          const purified = applyReplaceRules(raw, rules, { title: book.title, sourceName });
+          const purified = await this.purifyText(book, raw);
           sections.push(`${chapter.title}\n\n${purified}`);
           exportedChapters++;
         } catch { /* 缺失单章缓存不影响其余已缓存章节导出。 */ }
@@ -380,7 +380,7 @@ export class OnlineLibrary {
           this.cacheWrites = repair.catch(() => undefined);
           await repair;
         }
-        return { chapter: clone(chapter), text: this.purifyText(book, text), cached: true };
+        return { chapter: clone(chapter), text: await this.purifyText(book, text), cached: true };
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'ENOENT' && code !== 'VSREAD_EMPTY_CACHE') throw error;
@@ -396,11 +396,13 @@ export class OnlineLibrary {
     this.activeChapters.set(key, operation);
     return operation;
   }
-  private purifyText(book: StoredBook, raw: string): string {
+  private purifyText(book: StoredBook, raw: string): Promise<string> {
     const rules = this.state.replaceRules;
-    if (!rules?.length) return raw;
+    if (!rules?.length) return Promise.resolve(raw);
     const sourceName = this.state.sources.find(source => source.id === book.sourceId)?.name ?? '';
-    return applyReplaceRules(raw, rules, { title: book.title, sourceName });
+    return applyReplaceRules(raw, rules, { title: book.title, sourceName }, {
+      onTimeout: rule => this.log?.('warn', 'online.replace_rule_timeout', { ruleId: rule.id, ruleName: rule.name }),
+    });
   }
   async saveProgress(id: string, chapter: number, scroll: number): Promise<void> {
     const book = this.book(id);
@@ -730,7 +732,7 @@ export class OnlineLibrary {
     });
     this.cacheWrites = operation.catch(() => undefined);
     await operation;
-    return { chapter: clone(chapter), text: this.purifyText(book, text), cached: false };
+    return { chapter: clone(chapter), text: await this.purifyText(book, text), cached: false };
   }
   private persistCacheSize(book: StoredBook, chapterId: string, bytes: number): Promise<void> {
     return this.commitBookUpdate(book, draft => {

@@ -97,6 +97,8 @@ export function SourceSwitchPanel({ book, sources, builtins, busy, onSwitch, onS
   }, [book.author, book.sourceId, book.title, book.url, job, searchable]);
 
   const doneCount = job ? job.sources.filter(s => s.state !== 'queued' && s.state !== 'running').length : 0;
+  const errorSources = job ? job.sources.filter(s => s.state === 'error') : [];
+  const allFailed = !!job && (job.state === 'failed' || (job.state === 'completed' && job.sources.length > 0 && errorSources.length === job.sources.length));
 
   return <aside className="source-switch-panel" aria-label="换源选择">
     <div className="panel-heading">
@@ -108,10 +110,12 @@ export function SourceSwitchPanel({ book, sources, builtins, busy, onSwitch, onS
     </div>
     {!searchable.size ? <p className="panel-message muted">没有可用的在线书源，请先在“在线书源”启用或导入书源。</p>
       : <>
-        <p className="source-switch-status" role="status">
+        <p className={`source-switch-status${allFailed ? ' aggregate-search-error' : ''}`} role="status">
           {starting ? '正在向可用书源发起搜索…'
             : job?.state === 'running' ? `搜索中（${doneCount}/${job.sources.length} 个书源）…`
-            : job ? `已检索 ${job.sources.length} 个书源，找到 ${candidates.length} 个候选来源` : ''}
+            : job?.state === 'failed' ? `搜索失败：${job.error || '请稍后重试'}`
+            : allFailed ? `全部 ${job!.sources.length} 个书源搜索失败，请检查网络或稍后重试`
+            : job ? `已检索 ${job.sources.length} 个书源，找到 ${candidates.length} 个候选来源${errorSources.length ? `（${errorSources.length} 个书源失败）` : ''}` : ''}
         </p>
         <div className="source-switch-list">
           {candidates.length ? candidates.map(({ item, sourceName }) => <div className="source-switch-row" key={`${item.sourceId}:${item.url}`}>
@@ -120,7 +124,14 @@ export function SourceSwitchPanel({ book, sources, builtins, busy, onSwitch, onS
               <span>{item.title}{item.author ? ` · ${item.author}` : ''}</span>
             </div>
             <button className="text-button" disabled={busy} onClick={() => onSwitch(item)}>切换至此源</button>
-          </div>) : !starting && job?.state !== 'running' && <p className="panel-message muted">未找到其他来源的同名书籍。</p>}
+          </div>) : !starting && job?.state !== 'running' && (
+            allFailed
+              ? <div className="source-switch-errors">
+                <p className="panel-message aggregate-search-error">本次换源搜索未能从任何书源获取结果：</p>
+                {errorSources.slice(0, 5).map(source => <p className="panel-message muted" key={source.sourceId}>{source.name}：{source.error || '请求失败'}</p>)}
+              </div>
+              : <p className="panel-message muted">未找到其他来源的同名书籍{errorSources.length ? `（另有 ${errorSources.length} 个书源搜索失败，可点击重新搜索）` : ''}。</p>
+          )}
         </div>
       </>}
   </aside>;

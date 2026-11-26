@@ -76,19 +76,79 @@ test('换源章节智能对齐支持精确标题、去前缀核心标题、章�
   assert.equal(matchChapterIndex(oldChapters, 2, make(['A', 'B', 'C', 'D', 'E'])), 4);
 });
 
-test('正文净化规则校验 ReDoS 防护、适用范围与正则/纯文本替换', () => {
+test('正文净化规则校验 ReDoS 防护、适用范围、超时中止与正则/纯文本替换', async () => {
   assert.throws(() => normalizeReplaceRule({ name: '危险正则', pattern: '(a+)+b', replacement: '', isRegex: true }), /嵌套量词/);
   assert.throws(() => normalizeReplaceRule({ name: '语法错误', pattern: '[unclosed', replacement: '', isRegex: true }), /语法无效/);
   const globalRule = normalizeReplaceRule({ name: '去广告', pattern: '求月票', replacement: '', isRegex: false });
   const scopedRule = normalizeReplaceRule({ name: '特定站水印', pattern: '^访问.*\\.example$', replacement: '', isRegex: true, scope: '源甲' });
 
   const raw = '正文第一段。\n访问 www.test.example\n求月票！\n\n\n正文第二段。';
-  const cleanedA = applyReplaceRules(raw, [globalRule, scopedRule], { title: '星海', sourceName: '源甲' });
+  const cleanedA = await applyReplaceRules(raw, [globalRule, scopedRule], { title: '星海', sourceName: '源甲' });
   assert.equal(cleanedA, '正文第一段。\n\n！\n\n正文第二段。');
 
-  const cleanedB = applyReplaceRules(raw, [globalRule, scopedRule], { title: '星海', sourceName: '源乙' });
+  const cleanedB = await applyReplaceRules(raw, [globalRule, scopedRule], { title: '星海', sourceName: '源乙' });
   assert.match(cleanedB, /www\.test\.example/);
   assert.ok(!cleanedB.includes('求月票'));
+
+  // 灾难性回溯分支 `(a|aa)+$` 在独立 Worker 超时后被安全中止，不卡住宿主且后续正常规则仍继续执行。
+  const evilRule = normalizeReplaceRule({ name: '分支回溯', pattern: '(a|aa)+$', replacement: '', isRegex: true });
+  const followUp = normalizeReplaceRule({ name: '正常规则', pattern: '广告', replacement: '', isRegex: false });
+  const timedOut: string[] = [];
+  const started = Date.now();
+  const safeOutput = await applyReplaceRules(
+    `${'a'.repeat(40)}!\n广告正文`,
+    [evilRule, followUp],
+    { title: '星海', sourceName: '源甲' },
+    { timeoutMs: 120, onTimeout: rule => timedOut.push(rule.name) },
+  );
+  assert.ok(Date.now() - started < 1500, '灾难性回溯正则必须在超时后及时中止');
+  assert.deepEqual(timedOut, ['分支回溯']);
+  assert.equal(safeOutput, `${'a'.repeat(40)}!\n正文`);
+});
+
+test('换源与批量检查更新并发时，追更在锁内读取新书源而非旧源', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vsread-switch-check-race-'));
+  let enteredSwitch!: () => void;
+  let releaseSwitch!: () => void;
+  const switchStarted = new Promise<void>(resolve => { enteredSwitch = resolve; });
+  const allowSwitch = new Promise<void>(resolve => { releaseSwitch = resolve; });
+  let sourceBRequests = 0;
+  const fetchText: TextFetcher = async url => {
+    if (url === 'https://a.example/book/1') return { url, text: '<a class="chapter" href="/a/1">第一章</a>' };
+    if (url === 'https://b.example/book/new') {
+      sourceBRequests++;
+      if (sourceBRequests === 1) {
+        enteredSwitch();
+        await allowSwitch;
+        return { url, text: '<a class="chapter" href="/b/1">第一章</a><a class="chapter" href="/b/2">第二章</a>' };
+      }
+      return { url, text: '<a class="chapter" href="/b/1">第一章</a><a class="chapter" href="/b/2">第二章</a><a class="chapter" href="/b/3">第三章</a>' };
+    }
+    throw new Error(`未预期的 URL: ${url}`);
+  };
+  try {
+    const library = new OnlineLibrary(root, { fetchText }); await library.load();
+    const imported = await library.importSources({
+      json: JSON.stringify([makeSource('源甲', 'https://a.example'), makeSource('源乙', 'https://b.example')]),
+    });
+    const [sourceA, sourceB] = imported.sources;
+    const book = await library.add({ sourceId: sourceA.id, title: '并发追更', url: 'https://a.example/book/1' });
+
+    // 先启动换源占据排他锁，期间发起批量检查更新等待锁释放。
+    const switching = library.switchSource(book.id, { sourceId: sourceB.id, title: '并发追更', url: 'https://b.example/book/new' });
+    await switchStarted;
+    const checking = library.checkAllUpdates([book.id]);
+    releaseSwitch();
+
+    await switching;
+    const summary = await checking;
+    assert.deepEqual(summary.failed, []);
+    assert.equal(summary.checked, 1);
+    assert.equal(summary.updated.length, 1);
+    assert.equal(summary.updated[0].added, 1);
+    assert.equal(summary.books[0].sourceId, sourceB.id);
+    assert.equal(summary.books[0].chapters.length, 3);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('在线书库置顶、批量检查更新、换源对齐、正文净化与导出缓存 TXT 完整闭环', async () => {

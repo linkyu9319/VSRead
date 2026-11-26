@@ -129,10 +129,16 @@ async function mockEnhancedHost(page: Page) {
               break;
             }
             case 'online.searchAll.start': {
+              const allError = (window as any).__failSwitchSearch === true;
               const job = {
-                id: 'switch-job-1', query: args.query, state: 'completed', truncated: false,
-                sources: args.sourceIds.map((sourceId: string) => ({ sourceId, name: online.sources.find((s: any) => s.id === sourceId)?.name ?? '源', state: 'success', count: 1 })),
-                results: [
+                id: 'switch-job-' + Math.random().toString(36).slice(2, 8), query: args.query, state: 'completed', truncated: false,
+                sources: args.sourceIds.map((sourceId: string) => ({
+                  sourceId, name: online.sources.find((s: any) => s.id === sourceId)?.name ?? '源',
+                  state: allError ? 'error' : 'success',
+                  count: allError ? 0 : 1,
+                  error: allError ? '连接超时' : undefined,
+                })),
+                results: allError ? [] : [
                   { sourceId: sourceA.id, title: '在线星海', author: '作者甲', url: 'https://a.example/book/1' },
                   { sourceId: sourceB.id, title: '在线星海', author: '作者甲', url: 'https://b.example/book/alt' },
                 ],
@@ -157,6 +163,7 @@ async function mockEnhancedHost(page: Page) {
             case 'online.exportTxt': result = { exported: true, filePath: 'C:/export/在线星海.txt', exportedChapters: onlineBook.cachedChapters.length, totalChapters: onlineBook.chapters.length }; break;
             case 'replaceRules.list': result = online.replaceRules; break;
             case 'replaceRules.save': {
+              if ((window as any).__failSaveRule) throw new Error('正则表达式语法无效');
               const rule = { ...args.rule, id: args.rule.id ?? 'rule-' + (online.replaceRules.length + 1) };
               online.replaceRules = online.replaceRules.some((item: any) => item.id === rule.id)
                 ? online.replaceRules.map((item: any) => item.id === rule.id ? rule : item)
@@ -236,14 +243,23 @@ test('正文宽度、段间距、TXT/EPUB 书内搜索与 PDF 护眼滤镜', asy
   await page.locator('.search-results > button').first().click();
   await expect(page.locator('.txt-content')).toContainText('第二章 远航');
 
-  // EPUB 书内搜索
+  // EPUB 书内搜索（忽略 <style> 内不可见 CSS）与段间距设为 0 真正收紧
   await page.getByRole('button', { name: '我的书架', exact: true }).click();
   await page.getByRole('button', { name: '阅读 远航指南', exact: true }).click();
-  await expect(page.frameLocator('.epub-surface iframe').locator('h1')).toHaveText('第一章 星海');
+  const epubFrame = page.frameLocator('.epub-surface iframe');
+  await expect(epubFrame.locator('h1')).toHaveText('第一章 星海');
+  await page.getByLabel('搜索 EPUB 文字').fill('important');
+  await page.getByRole('button', { name: '查找', exact: true }).click();
+  await expect(page.locator('.search-results')).toContainText('没有找到匹配的文字');
   await page.getByLabel('搜索 EPUB 文字').fill('第二章');
   await page.getByRole('button', { name: '查找', exact: true }).click();
   await page.locator('.search-results > button').first().click();
-  await expect(page.frameLocator('.epub-surface iframe').locator('h1')).toHaveText('第二章 远航');
+  await expect(epubFrame.locator('h1')).toHaveText('第二章 远航');
+  await page.getByRole('button', { name: '阅读设置', exact: true }).click();
+  await page.getByLabel('段间距').fill('0');
+  await expect(epubFrame.locator('p').first()).toHaveCSS('margin-top', '0px');
+  await expect(epubFrame.locator('p').first()).toHaveCSS('margin-bottom', '0px');
+  await page.keyboard.press('Escape');
 
   // PDF 深色反色滤镜
   await page.getByRole('button', { name: '我的书架', exact: true }).click();
@@ -271,21 +287,39 @@ test('在线阅读预加载下一章、换源切换、导出 TXT 与正文净化
   await page.getByRole('button', { name: '导出 TXT', exact: true }).click();
   await expect(page.locator('.online-message')).toContainText('已导出 2 / 3 章为 TXT');
 
-  // 换源：打开换源面板并切换至“源乙”
+  // 换源：先验证所有书源失败时明确展示失败原因而非“未找到同名书”，再验证正常换源切换至“源乙”
+  await page.evaluate(() => { (window as any).__failSwitchSearch = true; });
   await page.getByRole('button', { name: '换源', exact: true }).click();
   const panel = page.getByRole('complementary', { name: '换源选择', exact: true });
+  await expect(panel).toContainText('全部 2 个书源搜索失败');
+  await expect(panel).toContainText('连接超时');
+  await expect(panel).not.toContainText('未找到其他来源的同名书籍');
+
+  await page.evaluate(() => { (window as any).__failSwitchSearch = false; });
+  await panel.getByRole('button', { name: '重新搜索', exact: true }).click();
   await expect(panel).toContainText('源乙');
   await panel.getByRole('button', { name: '切换至此源', exact: true }).click();
   await expect(page.locator('.online-reader-heading')).toContainText('源乙');
   await expect(page.locator('.online-message')).toContainText('已切换书源');
 
-  // 正文净化规则管理（在线书源页按需展开）
+  // 正文净化规则管理：保存失败保留用户输入，成功后才清空
   await page.getByRole('button', { name: '在线书源', exact: true }).click();
   await page.getByRole('button', { name: '管理净化规则', exact: true }).click();
+  await page.evaluate(() => { (window as any).__failSaveRule = true; });
   await page.getByLabel('规则名称').fill('过滤测试广告');
+  await page.getByLabel('匹配内容').fill('[invalid');
+  await page.getByRole('button', { name: '添加规则', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('正则表达式语法无效');
+  await expect(page.getByLabel('规则名称')).toHaveValue('过滤测试广告');
+  await expect(page.getByLabel('匹配内容')).toHaveValue('[invalid');
+  await page.getByRole('button', { name: '关闭提示', exact: true }).click();
+
+  await page.evaluate(() => { (window as any).__failSaveRule = false; });
   await page.getByLabel('匹配内容').fill('测试广告词');
   await page.getByRole('button', { name: '添加规则', exact: true }).click();
   const rulesSection = page.getByRole('region', { name: '正文净化规则', exact: true });
+  await expect(page.getByLabel('规则名称')).toHaveValue('');
+  await expect(page.getByLabel('匹配内容')).toHaveValue('');
   await expect(rulesSection).toContainText('过滤测试广告');
   await rulesSection.getByLabel('启用规则 过滤测试广告').uncheck();
   await expect(rulesSection.getByLabel('启用规则 过滤测试广告')).not.toBeChecked();

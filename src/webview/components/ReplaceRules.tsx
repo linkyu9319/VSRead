@@ -36,15 +36,16 @@ export function ReplaceRules({ onError }: { onError(error: unknown): void }) {
     setEditingId(undefined); setName(''); setPattern(''); setReplacement(''); setScope(''); setIsRegex(false);
   };
 
-  const run = async (action: () => Promise<ReplaceRule[]>, feedback?: string) => {
-    if (busy) return;
+  const run = async (action: () => Promise<ReplaceRule[]>, feedback?: string): Promise<boolean> => {
+    if (busy) return false;
     setBusy(true); setNotice('');
     try {
       const next = await action();
       setRules(next);
       setLoaded(true);
       if (feedback) setNotice(feedback);
-    } catch (error) { onError(error); }
+      return true;
+    } catch (error) { onError(error); return false; }
     finally { setBusy(false); }
   };
 
@@ -56,9 +57,17 @@ export function ReplaceRules({ onError }: { onError(error: unknown): void }) {
         rule: { ...(editingId ? { id: editingId } : {}), name: name.trim() || pattern.slice(0, 30), pattern, replacement, isRegex, enabled: true, scope: scope.trim() || undefined },
       }),
       editingId ? '规则已更新，阅读正文时立即生效' : '规则已添加，阅读正文时立即生效',
-    ).then(resetForm);
+    ).then(saved => { if (saved) resetForm(); });
   };
 
+  const toggleRule = (rule: ReplaceRule) => {
+    if (busy) return;
+    // 控件先响应用户操作；持久化失败再恢复，避免受控 checkbox 在 RPC 返回前闪回。
+    setRules(previous => previous.map(item => item.id === rule.id ? { ...item, enabled: !rule.enabled } : item));
+    void run(() => request('replaceRules.toggle', { id: rule.id, enabled: !rule.enabled })).then(ok => {
+      if (!ok) setRules(previous => previous.map(item => item.id === rule.id ? rule : item));
+    });
+  };
   const startEdit = (rule: ReplaceRule) => {
     setEditingId(rule.id);
     setName(rule.name);
@@ -100,7 +109,7 @@ export function ReplaceRules({ onError }: { onError(error: unknown): void }) {
       {notice && <p className="online-message" role="status">{notice}</p>}
       {rules.length ? <div className="online-source-list">{rules.map(rule => <div className="online-source-row" key={rule.id}>
         <label className="source-enabled">
-          <input type="checkbox" aria-label={`启用规则 ${rule.name}`} checked={rule.enabled} disabled={busy} onChange={() => void run(() => request('replaceRules.toggle', { id: rule.id, enabled: !rule.enabled }))} />
+          <input type="checkbox" aria-label={`启用规则 ${rule.name}`} checked={rule.enabled} disabled={busy} onChange={() => toggleRule(rule)} />
           <span>
             <strong>{rule.name}{rule.isRegex ? ' · 正则' : ''}{rule.scope ? ` · 范围：${rule.scope}` : ''}</strong>
             <small>{rule.pattern}{rule.replacement ? ` → ${rule.replacement}` : ' → （删除）'}</small>

@@ -13,8 +13,10 @@ interface SpineSearchSection {
   document?: Document;
   load(request: Book['load']): Promise<Document>;
   unload(): void;
-  find(query: string): { cfi: string; excerpt: string }[];
+  cfiFromRange(range: Range): string;
 }
+
+const SKIPPED_SEARCH_TAGS = new Set(['STYLE', 'SCRIPT', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'TITLE', 'SVG']);
 
 export class EpubReader implements ReaderAdapter {
   private book?: Book;
@@ -170,6 +172,43 @@ export class EpubReader implements ReaderAdapter {
       if (!this.destroyed) this.watchViewport();
     }
   }
+  private searchSectionBody(section: SpineSearchSection, query: string, chapterLabel: string, hits: SearchHit[]): void {
+    const doc = section.document;
+    const body = doc?.body;
+    if (!doc || !body) return;
+    const needle = query.toLocaleLowerCase();
+    const walker = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        let parent = node.parentElement;
+        while (parent && parent !== body) {
+          if (SKIPPED_SEARCH_TAGS.has(parent.tagName.toUpperCase()) || parent.hasAttribute('hidden')) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          parent = parent.parentElement;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let current = walker.nextNode() as Text | null;
+    while (current && hits.length < 100) {
+      const value = current.nodeValue ?? '';
+      const lower = value.toLocaleLowerCase();
+      let from = 0;
+      while (hits.length < 100) {
+        const at = lower.indexOf(needle, from);
+        if (at < 0) break;
+        const range = doc.createRange();
+        range.setStart(current, at);
+        range.setEnd(current, at + query.length);
+        const cfi = section.cfiFromRange(range);
+        const excerpt = value.slice(Math.max(0, at - 18), at + query.length + 42).replace(/\s+/g, ' ').trim();
+        hits.push({ id: cfi, label: `${chapterLabel} · ${excerpt}` });
+        from = at + Math.max(1, needle.length);
+      }
+      current = walker.nextNode() as Text | null;
+    }
+  }
   async search(query: string): Promise<SearchHit[]> {
     const trimmed = query.trim();
     const book = this.book;
@@ -184,13 +223,8 @@ export class EpubReader implements ReaderAdapter {
       try {
         if (!alreadyLoaded) await section.load(book.load.bind(book));
         if (this.destroyed || token !== this.searchGeneration) break;
-        const found = section.find(trimmed) ?? [];
         const chapterLabel = this.tocLabels.get(section.href) ?? `第 ${i + 1} 节`;
-        for (const hit of found) {
-          if (hits.length >= 100) break;
-          const excerpt = hit.excerpt.replace(/\s+/g, ' ').trim();
-          hits.push({ id: hit.cfi, label: `${chapterLabel} · ${excerpt}` });
-        }
+        this.searchSectionBody(section, trimmed, chapterLabel, hits);
       } catch { /* 跳过无法加载的特殊章节项，继续搜索其余章节。 */ }
       finally {
         if (!alreadyLoaded && !displayedIndices.has(i)) {
@@ -240,7 +274,8 @@ export class EpubReader implements ReaderAdapter {
         line-height: ${settings.lineHeight} !important;
         font-family: ${settings.fontFamily === 'serif' ? 'SimSun, serif' : 'system-ui, sans-serif'} !important;
       }
-      p { margin-bottom: ${paragraphSpacing}em !important; }
+      p { margin-top: 0 !important; margin-bottom: ${paragraphSpacing}em !important; }
+      p:last-child { margin-bottom: 0 !important; }
       img { max-width: 100% !important; height: auto !important; }
       a { color: inherit !important; }
     `;
