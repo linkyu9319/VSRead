@@ -336,20 +336,33 @@ export class OnlineLibrary {
     await Promise.all(Array.from({ length: Math.min(4, targets.length) }, worker));
     return { checked, skipped, updated, failed, books: this.listBooks() };
   }
-  async buildCachedTxt(id: string): Promise<{ title: string; author?: string; exportedChapters: number; totalChapters: number; content: string }> {
+  async buildCachedTxt(
+    id: string,
+    options: { totalTimeoutMs?: number; ruleTimeoutMs?: number } = {},
+  ): Promise<{ title: string; author?: string; exportedChapters: number; totalChapters: number; content: string }> {
     return this.withBookShared(id, async () => {
       const book = this.book(id);
       const sections: string[] = [book.title + (book.author ? `\n作者：${book.author}` : '')];
+      const totalTimeoutMs = Math.max(50, options.totalTimeoutMs ?? 60_000);
+      const deadlineMs = Date.now() + totalTimeoutMs;
+      // 同一次导出内，某条规则一旦超时即跳过，避免长书逐章反复等待。
+      const timedOutRuleIds = new Set<string>();
       let exportedChapters = 0;
       for (const chapter of book.chapters) {
         if (book.cacheSizes[chapter.id] === undefined) continue;
-        try {
-          const raw = await readFile(this.cacheFile(book, chapter), 'utf8');
-          if (!raw.trim()) continue;
-          const purified = await this.purifyText(book, raw);
-          sections.push(`${chapter.title}\n\n${purified}`);
-          exportedChapters++;
-        } catch { /* 缺失单章缓存不影响其余已缓存章节导出。 */ }
+        if (Date.now() >= deadlineMs) throw new Error('导出耗时过长已中止，请检查或停用耗时较长的正文净化规则后重试');
+        let raw: string;
+        try { raw = await readFile(this.cacheFile(book, chapter), 'utf8'); }
+        catch { continue; /* 缺失单章缓存不影响其余已缓存章节导出。 */ }
+        if (!raw.trim()) continue;
+        const purified = await this.purifyText(book, raw, {
+          timeoutMs: options.ruleTimeoutMs,
+          deadlineMs,
+          skipRuleIds: timedOutRuleIds,
+        });
+        if (Date.now() >= deadlineMs) throw new Error('导出耗时过长已中止，请检查或停用耗时较长的正文净化规则后重试');
+        sections.push(`${chapter.title}\n\n${purified}`);
+        exportedChapters++;
       }
       if (!exportedChapters) throw new Error('暂无已缓存章节，请先缓存章节或全本后再导出');
       return {
@@ -396,11 +409,16 @@ export class OnlineLibrary {
     this.activeChapters.set(key, operation);
     return operation;
   }
-  private purifyText(book: StoredBook, raw: string): Promise<string> {
+  private purifyText(
+    book: StoredBook,
+    raw: string,
+    options: { timeoutMs?: number; deadlineMs?: number; skipRuleIds?: Set<string> } = {},
+  ): Promise<string> {
     const rules = this.state.replaceRules;
     if (!rules?.length) return Promise.resolve(raw);
     const sourceName = this.state.sources.find(source => source.id === book.sourceId)?.name ?? '';
     return applyReplaceRules(raw, rules, { title: book.title, sourceName }, {
+      ...options,
       onTimeout: rule => this.log?.('warn', 'online.replace_rule_timeout', { ruleId: rule.id, ruleName: rule.name }),
     });
   }

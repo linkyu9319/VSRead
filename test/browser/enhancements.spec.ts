@@ -259,6 +259,21 @@ test('正文宽度、段间距、TXT/EPUB 书内搜索与 PDF 护眼滤镜', asy
   await page.getByLabel('段间距').fill('0');
   await expect(epubFrame.locator('p').first()).toHaveCSS('margin-top', '0px');
   await expect(epubFrame.locator('p').first()).toHaveCSS('margin-bottom', '0px');
+  // 复现“每段单独包在容器内”的 EPUB 结构：段间距从 0 调到 2.4em 必须真实拉开间距。
+  await epubFrame.locator('body').evaluate(body => {
+    const holder = document.createElement('section');
+    holder.id = 'wrapped-para-check';
+    holder.innerHTML = '<div><p id="wp-1">容器内第一段</p></div><div><p id="wp-2">容器内第二段</p></div>';
+    body.append(holder);
+  });
+  const wrappedGap = () => epubFrame.locator('#wrapped-para-check').evaluate(() => {
+    const first = document.getElementById('wp-1')!.getBoundingClientRect();
+    const second = document.getElementById('wp-2')!.getBoundingClientRect();
+    return second.top - first.bottom;
+  });
+  await expect.poll(wrappedGap).toBeLessThan(1);
+  await page.getByLabel('段间距').fill('2.4');
+  await expect.poll(wrappedGap).toBeGreaterThan(30);
   await page.keyboard.press('Escape');
 
   // PDF 深色反色滤镜

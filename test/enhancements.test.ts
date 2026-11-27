@@ -1,8 +1,9 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { DEFAULT_SETTINGS } from '../src/shared/model';
 import { normalizeSettings } from '../src/shared/validation';
 import { LibraryStore } from '../src/extension/store';
@@ -244,4 +245,91 @@ test('在线书库置顶、批量检查更新、换源对齐、正文净化与�
     assert.equal(restoredBook.sourceId, sourceB.id);
     assert.equal(restoredBook.progress?.chapter, 2);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('长书导出内已超时净化规则只超时一次后续跳过，总时限到达后立即中止', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vsread-export-budget-'));
+  const chapterCount = 12;
+  const fetchText: TextFetcher = async url => {
+    if (url === 'https://a.example/book/long') {
+      return {
+        url,
+        text: Array.from({ length: chapterCount }, (_, index) => `<a class="chapter" href="/c/${index}">第 ${index + 1} 章</a>`).join(''),
+      };
+    }
+    return { url, text: `<article id="content">${'a'.repeat(40)}!\n广告正文内容。</article>` };
+  };
+  const timeoutLogs: string[] = [];
+  try {
+    const library = new OnlineLibrary(root, {
+      fetchText,
+      log: (_level, event, data) => {
+        if (event === 'online.replace_rule_timeout' && typeof data?.ruleName === 'string') timeoutLogs.push(data.ruleName);
+      },
+    });
+    await library.load();
+    const imported = await library.importSources({ json: JSON.stringify(makeSource('源甲', 'https://a.example')) });
+    const book = await library.add({ sourceId: imported.sources[0].id, title: '长书测试', url: 'https://a.example/book/long' });
+    for (let i = 0; i < chapterCount; i++) await library.chapter(book.id, i);
+
+    await library.saveReplaceRule({ name: '慢正则一', pattern: '(a|aa)+$', replacement: '', isRegex: true, enabled: true });
+    await library.saveReplaceRule({ name: '去广告词', pattern: '广告', replacement: '', isRegex: false, enabled: true });
+
+    const started = Date.now();
+    const exported = await library.buildCachedTxt(book.id, { ruleTimeoutMs: 120, totalTimeoutMs: 5000 });
+    const elapsed = Date.now() - started;
+    assert.equal(exported.exportedChapters, chapterCount);
+    assert.equal(timeoutLogs.length, 1, '同一条超时规则在同一次导出中只应超时一次，后续章节直接跳过');
+    assert.ok(elapsed < 1000, `跳过已超时规则后导出应快速完成，实际耗时 ${elapsed}ms`);
+    assert.ok(!exported.content.includes('广告'), '其余正常净化规则仍应对全部章节生效');
+
+    // 多条慢正则叠加触达总时限时，应立即中止并抛出明确错误，不继续处理剩余章节。
+    await library.saveReplaceRule({ name: '慢正则二', pattern: '(a|aaa)+$', replacement: '', isRegex: true, enabled: true });
+    await library.saveReplaceRule({ name: '慢正则三', pattern: '(aa|a)+$', replacement: '', isRegex: true, enabled: true });
+    await assert.rejects(
+      library.buildCachedTxt(book.id, { ruleTimeoutMs: 80, totalTimeoutMs: 90 }),
+      /导出耗时过长已中止/,
+    );
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('导出规则在 Worker 排队到期时及时返回，队列释放后不执行过期规则', async () => {
+  const context = { title: '测试书', sourceName: '源甲' };
+  const occupying = normalizeReplaceRule({ pattern: '等待应答', isRegex: true });
+  const queued = normalizeReplaceRule({ pattern: '广告', isRegex: true });
+  const sentPatterns: string[] = [];
+  let releaseWorker!: () => void;
+  let dispatched!: () => void;
+  const workerBusy = new Promise<void>(resolve => { dispatched = resolve; });
+  const originalPost = Worker.prototype.postMessage;
+  const hook = mock.method(Worker.prototype, 'postMessage', function (this: Worker, message: { id: number; pattern: string }) {
+    sentPatterns.push(message.pattern);
+    if (message.pattern === occupying.pattern) {
+      releaseWorker = () => { this.emit('message', { id: message.id, ok: true, result: '已完成' }); };
+      dispatched();
+      return;
+    }
+    originalPost.call(this, message);
+  });
+  const held = applyReplaceRules('等待应答', [occupying], context, { timeoutMs: 2000 });
+  let heldFinished = false;
+  void held.then(() => { heldFinished = true; });
+  try {
+    await workerBusy;
+    const raw = '广告 正文';
+    const skipped = new Set<string>();
+    const result = await applyReplaceRules(raw, [queued], context, { deadlineMs: Date.now() + 40, skipRuleIds: skipped });
+    assert.equal(result, raw);
+    assert.equal(heldFinished, false, '导出到期应在前一个任务应答前返回');
+    assert.equal(skipped.size, 0, '排队超时不能记为规则执行超时');
+
+    releaseWorker();
+    assert.equal(await held, '已完成');
+    assert.equal(await applyReplaceRules(raw, [queued], context, { timeoutMs: 1000 }), '正文');
+    assert.deepEqual(sentPatterns, [occupying.pattern, queued.pattern], '只有重新提交的规则可以执行');
+  } finally {
+    releaseWorker?.();
+    await held;
+    hook.mock.restore();
+  }
 });

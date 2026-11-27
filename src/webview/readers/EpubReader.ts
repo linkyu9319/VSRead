@@ -275,7 +275,6 @@ export class EpubReader implements ReaderAdapter {
         font-family: ${settings.fontFamily === 'serif' ? 'SimSun, serif' : 'system-ui, sans-serif'} !important;
       }
       p { margin-top: 0 !important; margin-bottom: ${paragraphSpacing}em !important; }
-      p:last-child { margin-bottom: 0 !important; }
       img { max-width: 100% !important; height: auto !important; }
       a { color: inherit !important; }
     `;
