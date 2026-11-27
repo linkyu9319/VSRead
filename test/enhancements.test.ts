@@ -9,7 +9,7 @@ import { normalizeSettings } from '../src/shared/validation';
 import { LibraryStore } from '../src/extension/store';
 import { BookLibrary } from '../src/extension/library';
 import { OnlineLibrary } from '../src/extension/online/library';
-import { applyReplaceRules, matchChapterIndex, normalizeReplaceRule } from '../src/extension/online/replaceRules';
+import { applyReplaceRules, matchChapterIndex, normalizeReplaceRule, ReplaceRulesDeadlineError } from '../src/extension/online/replaceRules';
 import type { TextFetcher } from '../src/extension/online/network';
 
 const workerPath = path.resolve('dist/txtWorker.cjs');
@@ -318,8 +318,10 @@ test('导出规则在 Worker 排队到期时及时返回，队列释放后不执
     await workerBusy;
     const raw = '广告 正文';
     const skipped = new Set<string>();
-    const result = await applyReplaceRules(raw, [queued], context, { deadlineMs: Date.now() + 40, skipRuleIds: skipped });
-    assert.equal(result, raw);
+    await assert.rejects(
+      applyReplaceRules(raw, [queued], context, { deadlineMs: Date.now() + 40, skipRuleIds: skipped }),
+      ReplaceRulesDeadlineError,
+    );
     assert.equal(heldFinished, false, '导出到期应在前一个任务应答前返回');
     assert.equal(skipped.size, 0, '排队超时不能记为规则执行超时');
 
@@ -331,5 +333,62 @@ test('导出规则在 Worker 排队到期时及时返回，队列释放后不执
     releaseWorker?.();
     await held;
     hook.mock.restore();
+  }
+});
+
+test('净化计时器先于截止时钟触发时，导出不会返回未净化的末章', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'vsread-export-deadline-'));
+  const fetchText: TextFetcher = async url => ({ url, text: url.endsWith('/book/1')
+    ? '<a class="chapter" href="/c/1">第一章</a>'
+    : '<article id="content">广告 正文</article>' });
+  try {
+    const library = new OnlineLibrary(root, { fetchText });
+    await library.load();
+    const imported = await library.importSources({ json: JSON.stringify(makeSource('源甲', 'https://a.example')) });
+    const book = await library.add({ sourceId: imported.sources[0].id, title: '截止时间测试', url: 'https://a.example/book/1' });
+    await library.chapter(book.id, 0);
+    await library.saveReplaceRule({ pattern: '广告', isRegex: true });
+
+    const start = Date.now();
+    let now = start;
+    let posted = false;
+    const clock = mock.method(Date, 'now', () => now);
+    const hook = mock.method(Worker.prototype, 'postMessage', () => {
+      posted = true;
+      // 挂起净化应答，用模拟时钟让真实超时回调触发时仍比截止时间早 1 ms。
+      now = start + 49;
+    });
+    try {
+      await assert.rejects(library.buildCachedTxt(book.id, { totalTimeoutMs: 50 }), /导出耗时过长已中止/);
+      assert.equal(posted, true);
+      assert.equal(Date.now(), start + 49);
+    } finally {
+      hook.mock.restore();
+      clock.mock.restore();
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('迟到的净化结果被丢弃，下一条规则复用已应答的 Worker', async () => {
+  const context = { title: '测试书', sourceName: '源甲' };
+  const rule = normalizeReplaceRule({ pattern: '广告', isRegex: true });
+  const start = Date.now();
+  const deadline = start + 50;
+  let now = start;
+  const workers: Worker[] = [];
+  const clock = mock.method(Date, 'now', () => now);
+  const hook = mock.method(Worker.prototype, 'postMessage', function (this: Worker, message: { id: number }) {
+    workers.push(this);
+    if (workers.length === 1) now = deadline + 1;
+    this.emit('message', { id: message.id, ok: true, result: '正文' });
+  });
+  try {
+    await assert.rejects(applyReplaceRules('广告 正文', [rule], context, { deadlineMs: deadline }), ReplaceRulesDeadlineError);
+    assert.equal(await applyReplaceRules('广告 正文', [rule], context), '正文');
+    assert.equal(workers.length, 2);
+    assert.equal(workers[0], workers[1]);
+  } finally {
+    hook.mock.restore();
+    clock.mock.restore();
   }
 });

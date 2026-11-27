@@ -6,7 +6,7 @@ import { requestText, type TextFetcher, type TextResponse } from './network';
 import { normalizeSource, resolveSourceUrl, stableId } from './rules';
 import { getBuiltinSource, listBuiltinSources } from './builtins';
 import { sourceDocument } from './document';
-import { applyReplaceRules, matchChapterIndex, normalizeReplaceRule, normalizeReplaceRules } from './replaceRules';
+import { applyReplaceRules, matchChapterIndex, normalizeReplaceRule, normalizeReplaceRules, ReplaceRulesDeadlineError } from './replaceRules';
 import { diagnosticError, diagnosticUrl, type DiagnosticSink } from '../diagnostics';
 
 interface StoredBook extends OnlineBookRecord { cacheSizes: Record<string, number> }
@@ -20,6 +20,7 @@ interface BookLockState {
   waitingReaders: (() => void)[]; waitingWriters: (() => void)[];
 }
 const MAX_CACHE_BYTES = 200 * 1024 * 1024;
+const EXPORT_TIMEOUT_MESSAGE = '导出耗时过长已中止，请检查或停用耗时较长的正文净化规则后重试';
 const clone = <T>(value: T): T => structuredClone(value);
 
 /** 在线书架与本地文件书库分开存储；目录和正文缓存可独立离线读取。 */
@@ -350,7 +351,7 @@ export class OnlineLibrary {
       let exportedChapters = 0;
       for (const chapter of book.chapters) {
         if (book.cacheSizes[chapter.id] === undefined) continue;
-        if (Date.now() >= deadlineMs) throw new Error('导出耗时过长已中止，请检查或停用耗时较长的正文净化规则后重试');
+        if (Date.now() >= deadlineMs) throw new Error(EXPORT_TIMEOUT_MESSAGE);
         let raw: string;
         try { raw = await readFile(this.cacheFile(book, chapter), 'utf8'); }
         catch { continue; /* 缺失单章缓存不影响其余已缓存章节导出。 */ }
@@ -360,7 +361,7 @@ export class OnlineLibrary {
           deadlineMs,
           skipRuleIds: timedOutRuleIds,
         });
-        if (Date.now() >= deadlineMs) throw new Error('导出耗时过长已中止，请检查或停用耗时较长的正文净化规则后重试');
+        if (Date.now() >= deadlineMs) throw new Error(EXPORT_TIMEOUT_MESSAGE);
         sections.push(`${chapter.title}\n\n${purified}`);
         exportedChapters++;
       }
@@ -372,6 +373,9 @@ export class OnlineLibrary {
         totalChapters: book.chapters.length,
         content: sections.join('\n\n\n') + '\n',
       };
+    }).catch(error => {
+      if (error instanceof ReplaceRulesDeadlineError) throw new Error(EXPORT_TIMEOUT_MESSAGE);
+      throw error;
     });
   }
   async chapter(id: string, number: number, refresh = false): Promise<OnlineChapterContent> {

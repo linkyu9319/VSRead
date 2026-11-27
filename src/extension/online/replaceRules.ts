@@ -12,6 +12,13 @@ const DEFAULT_REGEX_TIMEOUT_MS = 200;
 const WORKER_IDLE_MS = 30_000;
 type RegexResult = { ok: true; result: string } | { ok: false; reason: 'error' | 'timeout' | 'deadline' };
 
+export class ReplaceRulesDeadlineError extends Error {
+  constructor() {
+    super('正文净化已超过总时限');
+    this.name = 'ReplaceRulesDeadlineError';
+  }
+}
+
 /** 基础静态 ReDoS 防护：拒绝明显会导致指数回溯的嵌套量词结构；运行期再由带超时的独立 Worker 兜底。 */
 const NESTED_QUANTIFIER = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]/;
 
@@ -90,14 +97,14 @@ class RegexWorkerPool {
     const id = ++this.sequence;
     return new Promise(resolve => {
       let settled = false;
-      const finish = (outcome: RegexResult) => {
+      const finish = (outcome: RegexResult, terminateWorker = false) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         worker.off('message', onMessage);
         worker.off('error', onError);
         worker.off('exit', onExit);
-        if (!outcome.ok && outcome.reason !== 'error') {
+        if (terminateWorker) {
           if (this.worker === worker) this.worker = undefined;
           void worker.terminate();
         } else {
@@ -107,6 +114,7 @@ class RegexWorkerPool {
       };
       const onMessage = (message: { id?: number; ok?: boolean; result?: string }) => {
         if (message?.id !== id) return;
+        // 收到应答说明任务已结束，结果迟到时仍可复用 Worker。
         if (deadlineMs !== undefined && Date.now() >= deadlineMs) finish({ ok: false, reason: 'deadline' });
         else if (message.ok && typeof message.result === 'string') finish({ ok: true, result: message.result });
         else finish({ ok: false, reason: 'error' });
@@ -114,7 +122,7 @@ class RegexWorkerPool {
       const onError = () => finish({ ok: false, reason: 'error' });
       const onExit = () => finish({ ok: false, reason: 'error' });
       const reason = remaining <= ruleBudget ? 'deadline' : 'timeout';
-      const timer = setTimeout(() => finish({ ok: false, reason }), Math.min(ruleBudget, remaining));
+      const timer = setTimeout(() => finish({ ok: false, reason }, true), Math.min(ruleBudget, remaining));
       worker.on('message', onMessage);
       worker.once('error', onError);
       worker.once('exit', onExit);
@@ -200,14 +208,15 @@ export async function applyReplaceRules(
   let output = text;
   let touched = false;
   for (const rule of active) {
-    if (options.deadlineMs !== undefined && Date.now() >= options.deadlineMs) break;
+    if (options.deadlineMs !== undefined && Date.now() >= options.deadlineMs) throw new ReplaceRulesDeadlineError();
     if (options.skipRuleIds?.has(rule.id)) continue;
     if (rule.isRegex) {
       const outcome = await regexRunner.run(output, rule.pattern, rule.replacement, timeoutMs, options.deadlineMs);
       if (outcome.ok) {
         if (outcome.result !== output) { output = outcome.result; touched = true; }
       } else if (outcome.reason === 'deadline') {
-        break;
+        // 直接传递超时，避免调用方再次读时钟时把未净化完的文本当成成功结果。
+        throw new ReplaceRulesDeadlineError();
       } else if (outcome.reason === 'timeout') {
         options.skipRuleIds?.add(rule.id);
         options.onTimeout?.(rule);
